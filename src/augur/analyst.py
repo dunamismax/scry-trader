@@ -61,6 +61,13 @@ class Analyst:
         self._conversation: list[dict[str, Any]] = []
         self._api_client: Any = None
 
+        # Fail fast if API backend is selected but no key is set
+        if self.backend == "api" and not os.environ.get("ANTHROPIC_API_KEY"):
+            raise AnalystError(
+                "ANTHROPIC_API_KEY environment variable is required when backend='api'. "
+                "Set it or switch to backend='cli'."
+            )
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -282,8 +289,6 @@ class Analyst:
             self.system_prompt,
             "--model",
             self.model,
-            "--tools",
-            "",
         ]
 
         reply = self._cli_run(cmd, full_prompt).strip()
@@ -305,8 +310,6 @@ class Analyst:
             self.system_prompt,
             "--model",
             self.model,
-            "--tools",
-            "",
         ]
 
         raw = self._cli_run(cmd, prompt)

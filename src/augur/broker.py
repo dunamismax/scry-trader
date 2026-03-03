@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import math
 from typing import TYPE_CHECKING, Any
 
 from ib_async import (
@@ -31,6 +33,8 @@ if TYPE_CHECKING:
     from augur.config import IBKRConfig
 
 logger = logging.getLogger(__name__)
+
+_DATA_TIMEOUT = 10  # seconds — max wait for market data
 
 
 class BrokerError(Exception):
@@ -131,9 +135,17 @@ class Broker:
         """Get a snapshot quote for a single symbol."""
         self._require_connection()
         contract = Stock(symbol, "SMART", "USD")
-        self.ib.qualifyContracts(contract)
+        await self.ib.qualifyContractsAsync(contract)
         ticker = self.ib.reqMktData(contract, snapshot=True)
-        await asyncio.sleep(2)  # allow data to arrive
+
+        try:
+            await asyncio.wait_for(
+                self.ib.updateEvent.wait(),
+                timeout=_DATA_TIMEOUT,
+            )
+        except TimeoutError:
+            logger.warning("Timed out waiting for quote data for %s", symbol)
+
         self.ib.cancelMktData(contract)
 
         last = _safe_float(ticker.last)
@@ -152,16 +164,22 @@ class Broker:
         """Get snapshot quotes for multiple symbols."""
         self._require_connection()
         contracts = [Stock(s, "SMART", "USD") for s in symbols]
-        self.ib.qualifyContracts(*contracts)
+        await self.ib.qualifyContractsAsync(*contracts)
 
         tickers: list[Ticker] = []
         for c in contracts:
             tickers.append(self.ib.reqMktData(c, snapshot=True))
 
-        await asyncio.sleep(3)  # allow data for all tickers
+        try:
+            await asyncio.wait_for(
+                self.ib.updateEvent.wait(),
+                timeout=_DATA_TIMEOUT,
+            )
+        except TimeoutError:
+            logger.warning("Timed out waiting for quote data")
 
         items: list[WatchlistItem] = []
-        for symbol, ticker in zip(symbols, tickers, strict=False):
+        for symbol, ticker in zip(symbols, tickers, strict=True):
             if ticker.contract:
                 self.ib.cancelMktData(ticker.contract)
             last = _safe_float(ticker.last)
@@ -185,9 +203,16 @@ class Broker:
         """Fetch options chain for a symbol."""
         self._require_connection()
         stock = Stock(symbol, "SMART", "USD")
-        self.ib.qualifyContracts(stock)
+        await self.ib.qualifyContractsAsync(stock)
         chains = self.ib.reqSecDefOptParams(stock.symbol, "", stock.secType, stock.conId)
-        await asyncio.sleep(1)
+
+        try:
+            await asyncio.wait_for(
+                self.ib.updateEvent.wait(),
+                timeout=_DATA_TIMEOUT,
+            )
+        except TimeoutError:
+            logger.warning("Timed out waiting for options chain data for %s", symbol)
 
         results: list[dict[str, Any]] = []
         for chain in chains:
@@ -206,13 +231,19 @@ class Broker:
         """Submit an order to IBKR. Returns the order result."""
         self._require_connection()
         contract = Stock(spec.symbol, "SMART", "USD")
-        self.ib.qualifyContracts(contract)
+        await self.ib.qualifyContractsAsync(contract)
 
         order = _build_order(spec)
         trade: Trade = self.ib.placeOrder(contract, order)
 
-        # Wait briefly for fill or acknowledgment
-        await asyncio.sleep(1)
+        # Wait for fill or acknowledgment via event
+        try:
+            await asyncio.wait_for(
+                self.ib.updateEvent.wait(),
+                timeout=_DATA_TIMEOUT,
+            )
+        except TimeoutError:
+            logger.warning("Timed out waiting for order acknowledgment")
 
         return OrderResult(
             order_id=trade.order.orderId,
@@ -231,7 +262,7 @@ class Broker:
             raise BrokerError("Bracket order requires take_profit_price and stop_loss_price")
 
         contract = Stock(spec.symbol, "SMART", "USD")
-        self.ib.qualifyContracts(contract)
+        await self.ib.qualifyContractsAsync(contract)
 
         bracket = self.ib.bracketOrder(
             action=spec.action.value,
@@ -244,7 +275,11 @@ class Broker:
         results: list[OrderResult] = []
         for order in bracket:
             trade = self.ib.placeOrder(contract, order)
-            await asyncio.sleep(0.5)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    self.ib.updateEvent.wait(),
+                    timeout=_DATA_TIMEOUT,
+                )
             results.append(
                 OrderResult(
                     order_id=trade.order.orderId,
@@ -295,7 +330,7 @@ def _safe_float(value: Any) -> float:
         return 0.0
     try:
         f = float(value)
-        if f != f:  # NaN check
+        if math.isnan(f):
             return 0.0
         return f
     except (ValueError, TypeError):

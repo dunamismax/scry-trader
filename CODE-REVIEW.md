@@ -10,7 +10,7 @@
 
 | Tool | Result |
 |------|--------|
-| `pytest` | **40/40 passed** (0.38s) |
+| `pytest` | **83/83 passed** (0.22s) |
 | `ruff check` | **All checks passed** |
 | `mypy --strict` | **No issues found** (11 source files) |
 
@@ -53,102 +53,51 @@ Positives:
 - Strict mypy passing on all 11 source files
 - Ruff passing with a sensible rule set (`E`, `F`, `I`, `N`, `UP`, `B`, `SIM`, `TCH`)
 
-Minor style issues:
-- `_safe_float` in `broker.py:298` uses `f != f` for NaN check — `math.isnan(f)` is more readable
-- `strict=False` in `zip(symbols, tickers, strict=False)` at `broker.py:164` — should be `strict=True` to catch length mismatches between symbols and tickers
+~~Minor style issues:~~
+- ~~`_safe_float` in `broker.py:298` uses `f != f` for NaN check — `math.isnan(f)` is more readable~~ **RESOLVED**
+- ~~`strict=False` in `zip(symbols, tickers, strict=False)` at `broker.py:164` — should be `strict=True` to catch length mismatches between symbols and tickers~~ **RESOLVED**
 
 ---
 
 ## 3. Trading Logic Safety
 
-**Verdict: Has a critical gap in market order risk estimation.**
+~~**Verdict: Has a critical gap in market order risk estimation.**~~
+**Verdict: All critical gaps resolved.**
 
-### CRITICAL — Market orders bypass risk checks
+### ~~CRITICAL~~ — Market orders bypass risk checks — **RESOLVED**
 
-`risk.py:163-166`:
-```python
-def _estimate_order_value(order: OrderSpec) -> float:
-    price = order.limit_price or order.stop_price or 0.0
-    return abs(order.quantity * price)
-```
+Fixed: `_estimate_order_value` now uses `reference_price` as fallback. `check_order` rejects market orders without a `reference_price`. CLI trade flow fetches a live quote to populate `reference_price` before risk checks.
 
-For `MARKET` orders, both `limit_price` and `stop_price` are `None`. The estimated value is **$0**, which means:
-- Position size check passes (0% of portfolio)
-- Buying power check passes ($0 < any buying power)
-- Leverage check passes (adds $0 to invested)
+### ~~HIGH~~ — Sell incorrectly maps to SHORT direction — **RESOLVED**
 
-**Fix:** For market orders, fetch or require a reference price (last quote, or require the caller to supply one). Alternatively, reject market orders without a reference price in the risk check.
+Fixed: `_trade_flow` now checks journal for existing open LONG trades when selling. If found, closes the existing trade via `close_trade` instead of creating a spurious SHORT entry.
 
-### HIGH — Sell incorrectly maps to SHORT direction
+### ~~MEDIUM~~ — `close_trade` P&L: zero counts as LOSS — **RESOLVED**
 
-`cli.py:402`:
-```python
-direction=Direction.LONG if action == OrderAction.BUY else Direction.SHORT,
-```
+Fixed: Added `TradeOutcome.BREAKEVEN`. P&L == 0 now records as BREAKEVEN instead of LOSS.
 
-Selling an existing long position is not a short trade. The journal will record closing a long as opening a short. This corrupts trade history and statistics.
+### ~~MEDIUM~~ — Journal entry_price can be None for market orders — **RESOLVED**
 
-### MEDIUM — `close_trade` P&L: zero counts as LOSS
-
-`journal.py:112`:
-```python
-outcome = TradeOutcome.WIN if pnl > 0 else TradeOutcome.LOSS
-```
-
-A break-even trade (P&L = $0.00) is recorded as a LOSS. Consider adding `TradeOutcome.BREAKEVEN` or treating zero as a win.
-
-### MEDIUM — Journal entry_price can be None for market orders
-
-`cli.py:404`:
-```python
-entry_price=order_spec.limit_price,
-```
-
-For market orders, `limit_price` is `None`, so the journal entry has no entry price. The subsequent `close_trade` P&L calculation uses `entry_price or 0.0`, which produces wildly wrong results.
+Fixed: Entry price now falls back to `reference_price` when `limit_price` is None.
 
 ---
 
 ## 4. Broker Integration (IBKR)
 
-**Verdict: Functional but fragile due to hardcoded sleeps and sync calls.**
+~~**Verdict: Functional but fragile due to hardcoded sleeps and sync calls.**~~
+**Verdict: Functional. Sync calls and hardcoded sleeps resolved.**
 
-### HIGH — `qualifyContracts` called synchronously
+### ~~HIGH~~ — `qualifyContracts` called synchronously — **RESOLVED**
 
-`broker.py:134`, `155`, `188`, `209`, `234`:
-```python
-self.ib.qualifyContracts(contract)
-```
+Fixed: All 5 call sites replaced with `await self.ib.qualifyContractsAsync(...)`.
 
-This is the synchronous version — it blocks the event loop. Should be:
-```python
-await self.ib.qualifyContractsAsync(contract)
-```
+### ~~HIGH~~ — Hardcoded `asyncio.sleep()` for market data — **RESOLVED**
 
-### HIGH — Hardcoded `asyncio.sleep()` for market data
+Fixed: Replaced with `asyncio.wait_for(self.ib.updateEvent.wait(), timeout=_DATA_TIMEOUT)` across all market data and order submission methods.
 
-`broker.py:136`:
-```python
-await asyncio.sleep(2)  # allow data to arrive
-```
+### ~~MEDIUM~~ — Order submission waits only 1 second — **RESOLVED**
 
-`broker.py:161`:
-```python
-await asyncio.sleep(3)  # allow data for all tickers
-```
-
-Market data may not arrive within the sleep window (network latency, IBKR throttling), or the sleep may be unnecessarily long. Should use event-based waiting:
-```python
-await asyncio.wait_for(ticker.updateEvent.wait(), timeout=self.config.timeout)
-```
-
-### MEDIUM — Order submission waits only 1 second
-
-`broker.py:215`:
-```python
-await asyncio.sleep(1)
-```
-
-After placing an order, the code waits 1 second then reads the status. If IBKR hasn't acknowledged the order yet, the status will be stale. Should wait for an `orderStatusEvent` or use `ib.waitOnUpdate()`.
+Fixed: Uses event-based waiting with configurable timeout.
 
 ### LOW — No reconnection logic
 
@@ -158,26 +107,16 @@ If the IBKR connection drops mid-operation, every method will throw `BrokerError
 
 ## 5. Claude / LLM Integration
 
-**Verdict: Well-structured dual-backend design. Some fragility in CLI backend.**
+~~**Verdict: Well-structured dual-backend design. Some fragility in CLI backend.**~~
+**Verdict: Well-structured dual-backend design. Key issues resolved.**
 
-### MEDIUM — No ANTHROPIC_API_KEY validation
+### ~~MEDIUM~~ — No ANTHROPIC_API_KEY validation — **RESOLVED**
 
-`analyst.py:72-73`:
-```python
-self._api_client = anthropic.Anthropic()
-```
+Fixed: `Analyst.__init__` now raises `AnalystError` immediately when `backend == "api"` and `ANTHROPIC_API_KEY` is not set.
 
-If `ANTHROPIC_API_KEY` is not set, the error will surface as a cryptic SDK exception deep in a request. Should validate at init time when `backend == "api"`.
+### ~~MEDIUM~~ — CLI backend passes `--tools ""` — **RESOLVED**
 
-### MEDIUM — CLI backend passes `--tools ""`
-
-`analyst.py:286-287`:
-```python
-"--tools",
-"",
-```
-
-Passing an empty string to `--tools` may have unintended behavior depending on Claude CLI version. If the intent is "no tools", verify this is the correct invocation.
+Fixed: Removed the `--tools ""` flag from both `_cli_text` and `_cli_structured`.
 
 ### LOW — Conversation history grows unbounded
 
@@ -196,17 +135,17 @@ For the CLI backend, conversation history is manually prepended to every prompt 
 
 ## 6. Error Handling
 
-**Verdict: Consistent pattern, but missing edge cases.**
+**Verdict: Consistent pattern. Key gaps resolved.**
 
 Positives:
 - Custom exception classes (`BrokerError`, `AnalystError`) with clean propagation
 - CLI commands catch domain errors and exit with informative messages
 - `try/finally` pattern for broker disconnect ensures cleanup
 
-Gaps:
+~~Gaps:~~
 - **No retry logic anywhere.** A transient network failure kills the entire operation. For API calls and IBKR connections, at least 1 retry with backoff would help.
-- **`_row_to_trade` will crash on schema changes.** Uses positional tuple indices (`row[0]`, `row[1]`, etc.) — any column addition or reorder breaks silently. Should use `sqlite3.Row` or a column-name mapping.
-- **`close_trade` notes concatenation bug.** `journal.py:118`: `notes = COALESCE(notes || '\n' || ?, notes)` appends even when the new notes parameter is empty, adding trailing newlines.
+- ~~**`_row_to_trade` will crash on schema changes.** Uses positional tuple indices (`row[0]`, `row[1]`, etc.) — any column addition or reorder breaks silently. Should use `sqlite3.Row` or a column-name mapping.~~ **RESOLVED** — now uses `sqlite3.Row` with column-name access.
+- ~~**`close_trade` notes concatenation bug.** `journal.py:118`: `notes = COALESCE(notes || '\n' || ?, notes)` appends even when the new notes parameter is empty, adding trailing newlines.~~ **RESOLVED** — empty notes no longer appended.
 
 ---
 
@@ -229,7 +168,7 @@ Concerns:
 
 ## 8. Database / Journal
 
-**Verdict: Functional. Some design issues.**
+**Verdict: Functional. Key issues resolved.**
 
 ### MEDIUM — New connection per operation
 
@@ -258,30 +197,29 @@ The schema is defined as `CREATE TABLE IF NOT EXISTS`. Adding columns later will
 
 ## 9. Testing
 
-**Verdict: Good coverage of core logic. Major gaps in integration layers.**
+~~**Verdict: Good coverage of core logic. Major gaps in integration layers.**~~
+**Verdict: Good coverage across all critical modules.**
 
-Covered (40 tests):
+Covered (83 tests):
 - `test_config.py` — config loading, defaults, missing file
-- `test_journal.py` — CRUD operations, trade closing, P&L calculation, stats, snapshots, analysis log
+- `test_journal.py` — CRUD operations, trade closing, P&L calculation, breakeven, notes handling, stats, snapshots, analysis log
 - `test_models.py` — Pydantic model construction, enum coercion, computed properties
-- `test_risk.py` — all risk rules (position size, leverage, buying power, stop-loss, daily loss, concentration, paper trading)
+- `test_risk.py` — all risk rules (position size, leverage, buying power, stop-loss, daily loss, concentration, paper trading, **market order risk validation**)
+- `test_broker.py` — `_build_order` (all order types + error cases), `_safe_float`, connection guard (**NEW**)
+- `test_analyst.py` — tool schema lookup, API key validation, context building, CLI JSON unwrapping, CLI subprocess mocking (**NEW**)
 
 **Not covered:**
-- `analyst.py` — zero tests. Claude integration (both backends) is untested.
-- `broker.py` — zero tests. IBKR operations are untested.
-- `cli.py` — zero tests. Click commands are untested.
+- `cli.py` — Click commands are untested (integration-level, harder to unit test).
 - `prompts/` — no tests that tool schemas are valid or match models.
-
-The analyst and broker modules should have unit tests with mocked dependencies.
 
 ---
 
 ## 10. Dependencies & Tech Debt
 
-### Unused dependencies
+### ~~Unused dependencies~~ — **RESOLVED**
 
-- **`pandas`** — listed in `[project.dependencies]` but never imported in source code.
-- **`httpx`** — listed as a direct dependency but only used transitively by `anthropic`. Should be in `anthropic`'s own deps, not a direct dependency.
+- ~~**`pandas`** — listed in `[project.dependencies]` but never imported in source code.~~ **Removed.**
+- ~~**`httpx`** — listed as a direct dependency but only used transitively by `anthropic`.~~ **Removed.**
 
 ### Stale venv
 
@@ -301,31 +239,31 @@ Using `pytest-asyncio==1.3.0` which is very old (current is 0.24+). The `asyncio
 
 ### P0 — Safety Critical (fix before any live trading)
 
-1. **Fix `_estimate_order_value` for market orders** — market orders currently bypass all position-size and buying-power risk checks because estimated value is $0.
-2. **Fix sell → SHORT journal mapping** — selling an existing long is not a short trade. Corrupts trade history.
-3. **Use `qualifyContractsAsync`** — sync version blocks the event loop.
+1. ~~**Fix `_estimate_order_value` for market orders**~~ — **RESOLVED.** Market orders now require `reference_price`; blocked by risk manager without one.
+2. ~~**Fix sell → SHORT journal mapping**~~ — **RESOLVED.** Selling an existing long now closes the trade instead of opening a spurious short.
+3. ~~**Use `qualifyContractsAsync`**~~ — **RESOLVED.** All sync calls replaced.
 
 ### P1 — High Value
 
-4. **Replace `asyncio.sleep()` with event-based waiting** — market data and order submission timing is fragile.
-5. **Add reference price requirement** — market orders should carry a reference price for risk estimation and journal logging.
-6. **Add analyst/broker unit tests** — zero coverage on the two most critical modules.
-7. **Validate API key at `Analyst.__init__`** — fail fast when `backend == "api"` and key is missing.
+4. ~~**Replace `asyncio.sleep()` with event-based waiting**~~ — **RESOLVED.** Uses `asyncio.wait_for` with timeout.
+5. ~~**Add reference price requirement**~~ — **RESOLVED.** `OrderSpec.reference_price` added; CLI fetches quote; risk manager enforces.
+6. ~~**Add analyst/broker unit tests**~~ — **RESOLVED.** 21 new tests for `_build_order`, `_safe_float`, `_unwrap_cli_json`, API key validation, CLI subprocess mocking, context building.
+7. ~~**Validate API key at `Analyst.__init__`**~~ — **RESOLVED.** Raises `AnalystError` immediately when key is missing.
 
 ### P2 — Medium Value
 
-8. **Use `sqlite3.Row` in journal** — eliminate fragile positional indexing.
+8. ~~**Use `sqlite3.Row` in journal**~~ — **RESOLVED.** Column-name access throughout.
 9. **Resolve relative DB path** — anchor to project root or XDG data directory.
 10. **Add `config.toml.example`** — gitignore the real `config.toml`, ship an example.
-11. **Fix `close_trade` notes concatenation** — avoid empty-string newline append.
-12. **Remove unused `pandas` and `httpx` deps** — reduce install footprint.
+11. ~~**Fix `close_trade` notes concatenation**~~ — **RESOLVED.** Empty notes no longer appended.
+12. ~~**Remove unused `pandas` and `httpx` deps**~~ — **RESOLVED.**
 13. **Add schema migration strategy** — `CREATE TABLE IF NOT EXISTS` won't handle column additions.
 
 ### P3 — Low Value / Polish
 
-14. **Add `TradeOutcome.BREAKEVEN`** — zero P&L shouldn't count as a loss.
-15. **Use `math.isnan()` instead of `f != f`** — readability.
-16. **Use `strict=True` in `zip()`** — catch length mismatches.
+14. ~~**Add `TradeOutcome.BREAKEVEN`**~~ — **RESOLVED.**
+15. ~~**Use `math.isnan()` instead of `f != f`**~~ — **RESOLVED.**
+16. ~~**Use `strict=True` in `zip()`**~~ — **RESOLVED.**
 17. **Generate tool schemas from Pydantic models** — eliminate drift risk between `prompts/tools.py` and `models.py`.
 18. **Add broker context manager** — `async with Broker(config) as broker:` pattern.
 19. **Upgrade `pytest-asyncio`** — 1.3.0 is very old.

@@ -327,22 +327,22 @@ def _trade_flow(
     config = _load()
     analyst = Analyst(config.claude, config.risk)
     risk_mgr = RiskManager(config.risk)
-    journal = Journal(config.database.path)
+    j = Journal(config.database.path)
 
-    # Get portfolio context
+    # Get portfolio context and a reference quote for market order risk estimation
     broker = Broker(config.ibkr)
     try:
-        portfolio = _run(_get_portfolio(broker))
+        portfolio, quote = _run(_get_portfolio_and_quote(broker, ticker))
     except BrokerError as e:
         console.print(f"[red]Broker error:[/red] {e}")
         sys.exit(1)
 
     # Get Claude's order recommendation
-    direction = "buy" if action == OrderAction.BUY else "sell"
-    console.print(f"[dim]Building {direction} order for {ticker}...[/dim]")
+    direction_str = "buy" if action == OrderAction.BUY else "sell"
+    console.print(f"[dim]Building {direction_str} order for {ticker}...[/dim]")
 
     try:
-        order_spec = analyst.construct_order(ticker, direction, portfolio=portfolio)
+        order_spec = analyst.construct_order(ticker, direction_str, portfolio=portfolio)
     except AnalystError as e:
         console.print(f"[red]Analysis error:[/red] {e}")
         sys.exit(1)
@@ -353,6 +353,10 @@ def _trade_flow(
     if limit_price is not None:
         order_spec.limit_price = limit_price
         order_spec.order_type = OrderType.LIMIT
+
+    # Set reference price from live quote for market order risk estimation
+    if quote.last_price > 0:
+        order_spec.reference_price = quote.last_price
 
     # Display the order
     console.print()
@@ -395,18 +399,52 @@ def _trade_flow(
         console.print(f"[red]Order submission failed:[/red] {e}")
         sys.exit(1)
 
-    # Journal entry
-    journal.add_trade(
+    # Determine journal entry price: prefer limit_price, fall back to reference_price
+    entry_price = order_spec.limit_price or order_spec.reference_price
+
+    # Determine direction: selling an existing long is not a short trade
+    if action == OrderAction.SELL:
+        open_trades = j.get_trades_by_ticker(ticker)
+        open_long = next(
+            (
+                t
+                for t in open_trades
+                if t.outcome == TradeOutcome.OPEN and t.direction == Direction.LONG
+            ),
+            None,
+        )
+        if open_long and open_long.id is not None:
+            # Close the existing long trade instead of opening a new short
+            j.close_trade(open_long.id, exit_price=entry_price or 0.0, notes=order_spec.reason)
+            console.print("[dim]Existing long trade closed in journal.[/dim]")
+            return
+
+    # No existing long to close — log as new trade
+    direction = Direction.LONG if action == OrderAction.BUY else Direction.SHORT
+    j.add_trade(
         TradeJournalEntry(
             ticker=ticker,
-            direction=Direction.LONG if action == OrderAction.BUY else Direction.SHORT,
-            entry_price=order_spec.limit_price,
+            direction=direction,
+            entry_price=entry_price,
             shares=order_spec.quantity,
             entry_date=datetime.now(),
             thesis=order_spec.reason,
         )
     )
     console.print("[dim]Trade logged to journal.[/dim]")
+
+
+async def _get_portfolio_and_quote(
+    broker: Broker, symbol: str
+) -> tuple[AccountSummary, WatchlistItem]:
+    """Fetch portfolio and a quote in a single connection."""
+    await broker.connect()
+    try:
+        summary = await broker.get_account_summary()
+        quote = await broker.get_quote(symbol)
+        return summary, quote
+    finally:
+        await broker.disconnect()
 
 
 async def _submit_order(broker: Broker, spec: OrderSpec) -> OrderResult:
@@ -560,6 +598,7 @@ def journal(ticker: str | None, open_only: bool, stats: bool, count: int) -> Non
         outcome_style = {
             TradeOutcome.WIN: "green",
             TradeOutcome.LOSS: "red",
+            TradeOutcome.BREAKEVEN: "dim",
             TradeOutcome.OPEN: "yellow",
         }.get(t.outcome, "white")
 

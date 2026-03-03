@@ -141,6 +141,34 @@ class TestRiskCheckOrder:
         result = rm.check_order(order, portfolio)
         assert any("paper trading" in w.lower() for w in result.warnings)
 
+    def test_market_order_without_reference_price_fails(self) -> None:
+        rm = RiskManager(_default_config())
+        order = OrderSpec(
+            symbol="AAPL",
+            action=OrderAction.BUY,
+            quantity=100,
+            order_type=OrderType.MARKET,
+            stop_loss_price=140.0,
+        )
+        portfolio = _make_portfolio(total_value=100_000)
+        result = rm.check_order(order, portfolio)
+        assert not result.ok
+        assert any("reference_price" in v.lower() for v in result.violations)
+
+    def test_market_order_with_reference_price_passes(self) -> None:
+        rm = RiskManager(_default_config())
+        order = OrderSpec(
+            symbol="AAPL",
+            action=OrderAction.BUY,
+            quantity=100,
+            order_type=OrderType.MARKET,
+            reference_price=150.0,
+            stop_loss_price=140.0,
+        )
+        portfolio = _make_portfolio(total_value=100_000)
+        result = rm.check_order(order, portfolio)
+        assert result.ok
+
     def test_existing_position_concentration(self) -> None:
         rm = RiskManager(_default_config(max_position_pct=20.0))
         # Already holding $15k of AAPL, buying another $15k = $30k = 30% > 20%

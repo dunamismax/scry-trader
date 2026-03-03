@@ -31,6 +31,7 @@ class OrderAction(StrEnum):
 class TradeOutcome(StrEnum):
     WIN = "win"
     LOSS = "loss"
+    BREAKEVEN = "breakeven"
     OPEN = "open"
 
 
@@ -107,6 +108,9 @@ class OrderSpec(BaseModel):
     # Bracket order components
     take_profit_price: float | None = None
     stop_loss_price: float | None = None
+
+    # Reference price for market orders (last quote, used for risk estimation)
+    reference_price: float | None = None
 
     # Metadata
     reason: str = ""

@@ -79,6 +79,47 @@ class TestTradeOperations:
         assert closed.outcome == TradeOutcome.WIN
         assert closed.pnl == 1000.0  # (200 - 180) * 50
 
+    def test_close_trade_breakeven(
+        self, journal: Journal, sample_trade: TradeJournalEntry
+    ) -> None:
+        trade_id = journal.add_trade(sample_trade)
+        closed = journal.close_trade(trade_id, exit_price=150.0)
+
+        assert closed is not None
+        assert closed.outcome == TradeOutcome.BREAKEVEN
+        assert closed.pnl == 0.0
+
+    def test_close_trade_notes_not_appended_when_empty(self, journal: Journal) -> None:
+        trade = TradeJournalEntry(
+            ticker="AAPL",
+            direction=Direction.LONG,
+            entry_price=100.0,
+            shares=10,
+            thesis="test",
+            notes="original note",
+        )
+        trade_id = journal.add_trade(trade)
+        closed = journal.close_trade(trade_id, exit_price=110.0, notes="")
+
+        assert closed is not None
+        assert closed.notes == "original note"  # no trailing newline added
+
+    def test_close_trade_notes_appended_when_provided(self, journal: Journal) -> None:
+        trade = TradeJournalEntry(
+            ticker="AAPL",
+            direction=Direction.LONG,
+            entry_price=100.0,
+            shares=10,
+            thesis="test",
+            notes="entry note",
+        )
+        trade_id = journal.add_trade(trade)
+        closed = journal.close_trade(trade_id, exit_price=110.0, notes="exit note")
+
+        assert closed is not None
+        assert "entry note" in closed.notes
+        assert "exit note" in closed.notes
+
     def test_get_nonexistent_trade(self, journal: Journal) -> None:
         assert journal.get_trade(999) is None
 

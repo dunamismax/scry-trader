@@ -51,6 +51,23 @@ CREATE TABLE IF NOT EXISTS analysis_log (
 );
 """
 
+_TRADE_COLUMNS = [
+    "id",
+    "ticker",
+    "direction",
+    "entry_price",
+    "exit_price",
+    "shares",
+    "entry_date",
+    "exit_date",
+    "thesis",
+    "claude_analysis",
+    "outcome",
+    "pnl",
+    "notes",
+    "tags",
+]
+
 
 class Journal:
     """SQLite-backed trade journal."""
@@ -65,7 +82,9 @@ class Journal:
             conn.executescript(SCHEMA)
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
 
     # --- Trade Operations ---
 
@@ -109,16 +128,39 @@ class Journal:
         else:
             pnl = (entry_price - exit_price) * trade.shares
 
-        outcome = TradeOutcome.WIN if pnl > 0 else TradeOutcome.LOSS
+        if pnl > 0:
+            outcome = TradeOutcome.WIN
+        elif pnl < 0:
+            outcome = TradeOutcome.LOSS
+        else:
+            outcome = TradeOutcome.BREAKEVEN
 
         with self._connect() as conn:
-            conn.execute(
-                """UPDATE trades
-                SET exit_price = ?, exit_date = ?, outcome = ?, pnl = ?,
-                    notes = COALESCE(notes || '\n' || ?, notes)
-                WHERE id = ?""",
-                (exit_price, datetime.now().isoformat(), outcome.value, pnl, notes, trade_id),
-            )
+            if notes:
+                conn.execute(
+                    """UPDATE trades
+                    SET exit_price = ?, exit_date = ?, outcome = ?, pnl = ?,
+                        notes = CASE WHEN notes IS NOT NULL AND notes != ''
+                                     THEN notes || '\n' || ?
+                                     ELSE ? END
+                    WHERE id = ?""",
+                    (
+                        exit_price,
+                        datetime.now().isoformat(),
+                        outcome.value,
+                        pnl,
+                        notes,
+                        notes,
+                        trade_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """UPDATE trades
+                    SET exit_price = ?, exit_date = ?, outcome = ?, pnl = ?
+                    WHERE id = ?""",
+                    (exit_price, datetime.now().isoformat(), outcome.value, pnl, trade_id),
+                )
 
         return self.get_trade(trade_id)
 
@@ -216,12 +258,12 @@ class Journal:
             for r in rows:
                 results.append(
                     PortfolioSnapshot(
-                        id=r[0],
-                        timestamp=datetime.fromisoformat(r[1]),
-                        total_value=r[2] or 0.0,
-                        cash=r[3] or 0.0,
-                        positions_json=r[4] or "",
-                        daily_pnl=r[5] or 0.0,
+                        id=r["id"],
+                        timestamp=datetime.fromisoformat(r["timestamp"]),
+                        total_value=r["total_value"] or 0.0,
+                        cash=r["cash"] or 0.0,
+                        positions_json=r["positions_json"] or "",
+                        daily_pnl=r["daily_pnl"] or 0.0,
                     )
                 )
             return results
@@ -246,21 +288,21 @@ class Journal:
             return cursor.lastrowid or 0
 
 
-def _row_to_trade(row: tuple) -> TradeJournalEntry:  # type: ignore[type-arg]
+def _row_to_trade(row: sqlite3.Row) -> TradeJournalEntry:
     """Convert a database row to a TradeJournalEntry."""
     return TradeJournalEntry(
-        id=row[0],
-        ticker=row[1],
-        direction=Direction(row[2]),
-        entry_price=row[3],
-        exit_price=row[4],
-        shares=row[5] or 0.0,
-        entry_date=datetime.fromisoformat(row[6]) if row[6] else None,
-        exit_date=datetime.fromisoformat(row[7]) if row[7] else None,
-        thesis=row[8] or "",
-        claude_analysis=row[9] or "",
-        outcome=TradeOutcome(row[10]) if row[10] else TradeOutcome.OPEN,
-        pnl=row[11] or 0.0,
-        notes=row[12] or "",
-        tags=row[13].split(",") if row[13] else [],
+        id=row["id"],
+        ticker=row["ticker"],
+        direction=Direction(row["direction"]),
+        entry_price=row["entry_price"],
+        exit_price=row["exit_price"],
+        shares=row["shares"] or 0.0,
+        entry_date=datetime.fromisoformat(row["entry_date"]) if row["entry_date"] else None,
+        exit_date=datetime.fromisoformat(row["exit_date"]) if row["exit_date"] else None,
+        thesis=row["thesis"] or "",
+        claude_analysis=row["claude_analysis"] or "",
+        outcome=TradeOutcome(row["outcome"]) if row["outcome"] else TradeOutcome.OPEN,
+        pnl=row["pnl"] or 0.0,
+        notes=row["notes"] or "",
+        tags=row["tags"].split(",") if row["tags"] else [],
     )

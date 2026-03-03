@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from augur.models import OrderType
+
 if TYPE_CHECKING:
     from augur.config import RiskConfig
     from augur.models import AccountSummary, OrderSpec
@@ -37,6 +39,13 @@ class RiskManager:
         # Paper trading gate
         if self.config.paper_trading:
             warnings.append("Paper trading mode is ON. Orders go to paper account.")
+
+        # Market orders must have a reference price for risk estimation
+        if order.order_type == OrderType.MARKET and order.reference_price is None:
+            violations.append(
+                "Market orders require a reference_price for risk estimation. "
+                "Fetch a quote before submitting."
+            )
 
         # Stop-loss requirement
         if (
@@ -161,8 +170,13 @@ class RiskManager:
 
 
 def _estimate_order_value(order: OrderSpec) -> float:
-    """Estimate the dollar value of an order."""
-    price = order.limit_price or order.stop_price or 0.0
+    """Estimate the dollar value of an order.
+
+    Uses limit_price, stop_price, or reference_price (for market orders).
+    Returns 0.0 only if no price is available — callers must treat this as
+    an error for market orders (enforced by check_order).
+    """
+    price = order.limit_price or order.stop_price or order.reference_price or 0.0
     return abs(order.quantity * price)
 
 

@@ -13,8 +13,6 @@ dependencies = [
     "click",
     "rich",
     "pydantic>=2.0",
-    "httpx",
-    "pandas",
 ]
 
 [project.optional-dependencies]
@@ -23,7 +21,6 @@ dev = [
     "pytest-asyncio",
     "ruff",
     "mypy",
-    "pandas-stubs",
 ]
 
 [project.scripts]
