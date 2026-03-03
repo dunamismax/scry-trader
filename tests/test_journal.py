@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from scry_trader.journal import Journal
-from scry_trader.models import (
+from augur.journal import Journal
+from augur.models import (
     AnalysisLogEntry,
     Direction,
     PortfolioSnapshot,

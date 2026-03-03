@@ -6,8 +6,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from scry_trader.config import RiskConfig
-    from scry_trader.models import AccountSummary, OrderSpec
+    from augur.config import RiskConfig
+    from augur.models import AccountSummary, OrderSpec
 
 
 @dataclass

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from scry_trader.config import AppConfig, load_config
+from augur.config import AppConfig, load_config
 
 
 class TestConfig:

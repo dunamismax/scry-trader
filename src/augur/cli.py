@@ -1,4 +1,4 @@
-"""Click CLI — the primary interface for scry-trader."""
+"""Click CLI — the primary interface for Augur."""
 
 from __future__ import annotations
 
@@ -12,11 +12,11 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from scry_trader.analyst import Analyst, AnalystError
-from scry_trader.broker import Broker, BrokerError
-from scry_trader.config import AppConfig, load_config
-from scry_trader.journal import Journal
-from scry_trader.models import (
+from augur.analyst import Analyst, AnalystError
+from augur.broker import Broker, BrokerError
+from augur.config import AppConfig, load_config
+from augur.journal import Journal
+from augur.models import (
     AccountSummary,
     AnalysisLogEntry,
     Direction,
@@ -28,7 +28,7 @@ from scry_trader.models import (
     TradeOutcome,
     WatchlistItem,
 )
-from scry_trader.risk import RiskManager
+from augur.risk import RiskManager
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -49,9 +49,9 @@ def _run[T](coro: Coroutine[Any, Any, T]) -> T:
 
 
 @click.group()
-@click.version_option(package_name="scry-trader")
+@click.version_option(package_name="augur")
 def main() -> None:
-    """scry-trader — AI-assisted, human-directed trading system."""
+    """Augur — AI-assisted, human-directed trading system."""
     pass
 
 

@@ -18,7 +18,7 @@ from ib_async import (
     Trade,
 )
 
-from scry_trader.models import (
+from augur.models import (
     AccountSummary,
     OrderResult,
     OrderSpec,
@@ -28,7 +28,7 @@ from scry_trader.models import (
 )
 
 if TYPE_CHECKING:
-    from scry_trader.config import IBKRConfig
+    from augur.config import IBKRConfig
 
 logger = logging.getLogger(__name__)
 

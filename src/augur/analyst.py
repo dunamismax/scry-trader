@@ -1,4 +1,4 @@
-"""Claude analysis engine — the brain of scry-trader.
+"""Claude analysis engine — the brain of Augur.
 
 Supports two backends:
   - "cli": shells out to the ``claude`` CLI (uses Claude Max subscription)
@@ -13,7 +13,7 @@ import os
 import subprocess
 from typing import TYPE_CHECKING, Any
 
-from scry_trader.models import (
+from augur.models import (
     AccountSummary,
     OrderSpec,
     PortfolioRiskAssessment,
@@ -21,11 +21,11 @@ from scry_trader.models import (
     TradeAnalysis,
     TradeJournalEntry,
 )
-from scry_trader.prompts.system import build_system_prompt
-from scry_trader.prompts.tools import TRADING_TOOLS
+from augur.prompts.system import build_system_prompt
+from augur.prompts.tools import TRADING_TOOLS
 
 if TYPE_CHECKING:
-    from scry_trader.config import ClaudeConfig, RiskConfig
+    from augur.config import ClaudeConfig, RiskConfig
 
 logger = logging.getLogger(__name__)
 

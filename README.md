@@ -1,4 +1,4 @@
-# scry-trader
+# Augur
 
 AI-assisted, human-directed trading system built on Claude and Interactive Brokers.
 
@@ -16,20 +16,20 @@ CLI-first. Every trade requires human confirmation. Claude analyzes, sizes, and 
 ## Commands
 
 ```
-scry-trader portfolio     # Positions, P&L, allocation
-scry-trader watch [SYM]   # Live quotes for watchlist or specific symbols
-scry-trader analyze TICKER # Deep Claude analysis with entry/exit/risk levels
-scry-trader ask "question" # Free-form question with portfolio context
-scry-trader buy TICKER     # Interactive buy flow with Claude sizing
-scry-trader sell TICKER    # Interactive sell flow
-scry-trader risk           # Portfolio risk assessment (rules + Claude)
-scry-trader journal        # Trade journal with stats and filtering
+augur portfolio     # Positions, P&L, allocation
+augur watch [SYM]   # Live quotes for watchlist or specific symbols
+augur analyze TICKER # Deep Claude analysis with entry/exit/risk levels
+augur ask "question" # Free-form question with portfolio context
+augur buy TICKER     # Interactive buy flow with Claude sizing
+augur sell TICKER    # Interactive sell flow
+augur risk           # Portfolio risk assessment (rules + Claude)
+augur journal        # Trade journal with stats and filtering
 ```
 
 ## Architecture
 
 ```
-src/scry_trader/
+src/augur/
 ├── cli.py        # Click CLI — primary interface
 ├── broker.py     # IBKR connection, orders, quotes
 ├── analyst.py    # Claude integration — analysis, sizing, risk
@@ -44,8 +44,8 @@ src/scry_trader/
 
 ```bash
 # Clone
-git clone git@github.com:dunamismax/scry-trader.git
-cd scry-trader
+git clone git@github.com:dunamismax/augur.git
+cd augur
 
 # Install (requires uv)
 uv sync --all-extras
@@ -55,7 +55,7 @@ cp config.toml.example config.toml
 # Edit config.toml with your IBKR and Anthropic API settings
 
 # Run
-uv run scry-trader portfolio
+uv run augur portfolio
 ```
 
 ## Development

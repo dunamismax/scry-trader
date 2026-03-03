@@ -707,7 +707,7 @@ wheels = [
 ]
 
 [[package]]
-name = "scry-trader"
+name = "augur"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

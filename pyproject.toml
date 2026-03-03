@@ -1,5 +1,5 @@
 [project]
-name = "scry-trader"
+name = "augur"
 version = "0.1.0"
 description = "AI-assisted, human-directed trading system built on Claude and Interactive Brokers"
 readme = "README.md"
@@ -27,7 +27,7 @@ dev = [
 ]
 
 [project.scripts]
-scry-trader = "scry_trader.cli:main"
+augur = "augur.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.10.7,<0.11.0"]

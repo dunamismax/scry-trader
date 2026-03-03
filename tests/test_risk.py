@@ -1,14 +1,14 @@
 """Tests for risk management module."""
 
-from scry_trader.config import RiskConfig
-from scry_trader.models import (
+from augur.config import RiskConfig
+from augur.models import (
     AccountSummary,
     OrderAction,
     OrderSpec,
     OrderType,
     Position,
 )
-from scry_trader.risk import RiskManager
+from augur.risk import RiskManager
 
 
 def _default_config(**overrides: float | bool) -> RiskConfig:

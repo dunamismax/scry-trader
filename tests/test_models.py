@@ -1,6 +1,6 @@
 """Tests for Pydantic models."""
 
-from scry_trader.models import (
+from augur.models import (
     AccountSummary,
     ConvictionLevel,
     Direction,
