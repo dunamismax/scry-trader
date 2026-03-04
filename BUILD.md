@@ -1,55 +1,103 @@
 # augur — Build Tracker
 
-**Status:** Phase 0 — Planning
-**Last Updated:** 2026-03-03 05:32 ET
+**Status:** Phase 1 — IBKR Connection & Market Data
+**Last Updated:** 2026-03-04
 **Branch:** `main`
 
 ---
 
-## Current Objective
+## What This Repo Is
 
-- [ ] Define immediate milestone for this repo.
-- [ ] Confirm success criteria and verification gate.
+AI-assisted, human-directed trading system. Claude analyzes market data and positions; the human makes every trade decision. Built on Interactive Brokers (via ib-async) with Anthropic's API for analysis. CLI-first — no web UI.
+
+## Architecture Snapshot
+
+```
+augur/
+├── src/augur/
+│   ├── cli.py              # Click-based CLI entry point
+│   ├── config.py           # TOML config loader (Pydantic validated)
+│   ├── models.py           # Core domain models
+│   ├── broker.py           # IBKR connection via ib-async
+│   ├── analyst.py          # Claude-powered market analysis
+│   ├── risk.py             # Position sizing and risk management
+│   ├── journal.py          # Trade journal / decision log
+│   └── prompts/
+│       ├── system.py       # System prompt for Claude analyst
+│       └── tools.py        # Tool definitions for Claude
+├── tests/                  # pytest + pytest-asyncio
+├── config.toml             # Runtime configuration
+├── data/                   # Local data storage (market data, journals)
+└── pyproject.toml          # uv-managed, Python 3.12+
+```
+
+**Stack:** Python 3.12+, uv, ib-async, anthropic SDK, Click, Rich, Pydantic, Ruff, mypy.
 
 ---
 
 ## Phase Plan
 
-## Phase 0 — Scope & Setup
-- [x] Add root `BUILD.md` tracker
-- [ ] Confirm current architecture snapshot
-- [ ] Define next implementation pass
+### Phase 1 — IBKR Connection & Market Data (Current)
 
-## Phase 1 — Core Delivery
-- [ ] Implement next high-value milestone
-- [ ] Add/adjust tests for changed behavior
-- [ ] Verify lint/build/test for changed surface
+**Goal:** Reliable connection to IBKR Gateway/TWS with live market data streaming and portfolio snapshot.
 
-## Phase 2 — Hardening
-- [ ] Reliability and error handling pass
-- [ ] Observability/logging pass
-- [ ] Backup/restore or rollback notes where relevant
+**Success criteria:** Run `augur status` → see account summary, positions, and P&L. Run `augur watch AAPL` → see live bid/ask/last streaming to terminal.
 
----
+- [ ] Verify `broker.py` connects to IBKR Gateway (paper account first)
+- [ ] Implement `augur status` — account summary, buying power, positions with P&L
+- [ ] Implement `augur watch <symbol>` — live streaming quotes (Rich live display)
+- [ ] Portfolio snapshot: fetch all positions with cost basis, market value, unrealized P&L
+- [ ] Historical data fetch for a given symbol + timeframe
+- [ ] Connection resilience: auto-reconnect on disconnect, connection state logging
+- [ ] Config validation: ensure `config.toml` has required IBKR connection params
+- [ ] Test with IBKR paper trading account
+- [ ] Verify: `augur status` returns real data, `augur watch` streams live
 
-## Integration Backlog (Phase A)
+### Phase 2 — Claude Analysis Engine
 
-- [ ] GitHub automation path defined (issue triage + PR review)
-- [ ] OpenClaw cron summaries linked to repo status
-- [ ] External integrations considered (Notion/M365/etc.) with risk notes
-- [ ] Decide auto-act vs ask-first policy for this repo
+**Goal:** Claude analyzes positions and market conditions, produces actionable insights.
+
+- [ ] `augur analyze <symbol>` — fetch data, send to Claude with market context, display analysis
+- [ ] `augur review` — portfolio-wide analysis (risk concentration, sector exposure, opportunities)
+- [ ] Prompt engineering: system prompt with trading context, tool use for data retrieval
+- [ ] Analysis output: structured (risk score, conviction level, key factors, suggested actions)
+- [ ] Rate limiting / cost tracking for Anthropic API calls
+- [ ] Journal integration: log every analysis with timestamp and market snapshot
+
+### Phase 3 — Risk Management & Journaling
+
+- [ ] Position sizing calculator (Kelly criterion or fixed-fractional)
+- [ ] Risk rules: max position size, max sector concentration, max drawdown alerts
+- [ ] Trade journal: record decisions, rationale, entry/exit, outcome
+- [ ] `augur journal` — view/search decision history
+- [ ] P&L attribution: which analyses led to profitable decisions
+
+### Phase 4 — Alerting & Automation
+
+- [ ] Price alerts (notify via Signal through OpenClaw)
+- [ ] Scheduled portfolio reviews (OpenClaw cron → `augur review` → Signal summary)
+- [ ] Watchlist management
+- [ ] Paper trade execution (human confirms, system submits to paper account)
 
 ---
 
 ## Verification Snapshot
 
-- Latest run: _not run yet for this tracker update_
-- Notes: docs-only initialization
+```
+uv run ruff check src/   ✅  (all checks passed)
+uv run mypy src/          ✅  (11 source files, no issues)
+```
+
+Last verified: 2026-03-04
 
 ---
 
-## Next Pass Priorities
+## Agent Instructions
 
-1. Define exact next implementation target.
-2. Execute smallest valuable patch.
-3. Update this tracker in same commit.
+- This is a **Python** project — use `uv` for all package management, never pip directly.
+- Run verification with `uv run ruff check src/` and `uv run mypy src/`.
+- IBKR connection requires TWS or IB Gateway running — tests should mock `ib-async` connections.
+- **Never place real trades** without explicit human confirmation. Paper account only during development.
+- Rich library for terminal output — use `rich.console`, `rich.table`, `rich.live` for streaming data.
+- `config.toml` holds runtime config — never commit secrets (API keys, account numbers) to it.
+- Update this BUILD.md in the same commit as meaningful changes.
