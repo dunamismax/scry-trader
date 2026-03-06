@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from augur.config import AppConfig, load_config
 
 
@@ -12,6 +14,14 @@ class TestConfig:
         assert config.claude.model == "claude-opus-4-6"
         assert config.risk.max_position_pct == 40.0
         assert config.risk.paper_trading is True
+
+    def test_live_mode_requires_explicit_account(self) -> None:
+        with pytest.raises(ValueError, match="ibkr.account"):
+            AppConfig.model_validate({"risk": {"paper_trading": False}})
+
+    def test_invalid_backend_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="backend"):
+            AppConfig.model_validate({"claude": {"backend": "shell"}})
 
     def test_load_missing_file(self) -> None:
         config = load_config(Path("/nonexistent/config.toml"))

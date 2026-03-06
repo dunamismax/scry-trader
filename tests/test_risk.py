@@ -3,22 +3,21 @@
 from augur.config import RiskConfig
 from augur.models import (
     AccountSummary,
+    Direction,
     OrderAction,
     OrderSpec,
     OrderType,
     Position,
 )
-from augur.risk import RiskManager
+from augur.risk import RiskManager, classify_order_exposure
 
 
 def _default_config(**overrides: float | bool) -> RiskConfig:
     defaults: dict[str, float | bool] = {
         "max_position_pct": 40.0,
-        "max_sector_pct": 60.0,
         "max_daily_loss_pct": 5.0,
         "max_leverage": 2.0,
         "require_stop_loss": True,
-        "allow_naked_options": False,
         "paper_trading": True,
     }
     defaults.update(overrides)
@@ -179,6 +178,54 @@ class TestRiskCheckOrder:
         assert not result.ok
         assert any("total position" in v.lower() for v in result.violations)
 
+    def test_sell_that_reduces_long_bypasses_entry_checks(self) -> None:
+        rm = RiskManager(_default_config(max_position_pct=5.0, max_daily_loss_pct=2.0))
+        order = _make_order(
+            action=OrderAction.SELL,
+            quantity=50,
+            limit_price=150.0,
+            stop_loss_price=None,
+        )
+        portfolio = _make_portfolio(
+            positions=[Position(symbol="AAPL", quantity=100, avg_cost=150.0)],
+            unrealized_pnl=-3_000,
+        )
+        result = rm.check_order(order, portfolio)
+        assert result.ok
+        assert any("reduces exposure" in warning.lower() for warning in result.warnings)
+
+    def test_sell_flip_only_checks_excess_short(self) -> None:
+        rm = RiskManager(_default_config(max_position_pct=5.0, paper_trading=False))
+        order = _make_order(
+            action=OrderAction.SELL,
+            quantity=150,
+            limit_price=150.0,
+            stop_loss_price=160.0,
+        )
+        portfolio = _make_portfolio(
+            total_value=100_000,
+            positions=[Position(symbol="AAPL", quantity=100, avg_cost=150.0)],
+        )
+        result = rm.check_order(order, portfolio)
+        assert not result.ok
+        assert any("position size" in violation.lower() for violation in result.violations)
+
+    def test_buy_to_cover_short_is_treated_as_reducing(self) -> None:
+        rm = RiskManager(_default_config(max_daily_loss_pct=2.0))
+        order = _make_order(
+            action=OrderAction.BUY,
+            quantity=30,
+            limit_price=150.0,
+            stop_loss_price=None,
+        )
+        portfolio = _make_portfolio(
+            positions=[Position(symbol="AAPL", quantity=-40, avg_cost=150.0)],
+            unrealized_pnl=-3_000,
+        )
+        result = rm.check_order(order, portfolio)
+        assert result.ok
+        assert any("reduces exposure" in warning.lower() for warning in result.warnings)
+
 
 class TestPortfolioHealth:
     def test_healthy_portfolio(self) -> None:
@@ -225,3 +272,21 @@ class TestPortfolioHealth:
         portfolio = _make_portfolio(total_value=0)
         result = rm.check_portfolio_health(portfolio)
         assert result.ok
+
+
+class TestExposureClassification:
+    def test_sell_flip_is_split_between_reduce_and_open(self) -> None:
+        portfolio = _make_portfolio(
+            positions=[Position(symbol="AAPL", quantity=100, avg_cost=150.0)]
+        )
+        order = _make_order(
+            action=OrderAction.SELL,
+            quantity=150,
+            limit_price=150.0,
+            stop_loss_price=160.0,
+        )
+        exposure = classify_order_exposure(order, portfolio)
+        assert exposure.reducing_quantity == 100
+        assert exposure.opening_quantity == 50
+        assert exposure.reducing_direction == Direction.LONG
+        assert exposure.opening_direction == Direction.SHORT

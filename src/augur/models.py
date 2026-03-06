@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # --- Enums ---
 
@@ -26,6 +26,13 @@ class OrderType(StrEnum):
 class OrderAction(StrEnum):
     BUY = "BUY"
     SELL = "SELL"
+
+
+class TimeInForce(StrEnum):
+    DAY = "DAY"
+    GTC = "GTC"
+    IOC = "IOC"
+    FOK = "FOK"
 
 
 class TradeOutcome(StrEnum):
@@ -61,6 +68,14 @@ class Position(BaseModel):
     unrealized_pnl: float = 0.0
     realized_pnl: float = 0.0
     account: str = ""
+
+    @field_validator("symbol")
+    @classmethod
+    def _normalize_symbol(cls, value: str) -> str:
+        symbol = value.strip().upper()
+        if not symbol:
+            raise ValueError("symbol must not be empty")
+        return symbol
 
     @property
     def pnl_percent(self) -> float:
@@ -99,22 +114,65 @@ class OrderSpec(BaseModel):
 
     symbol: str
     action: OrderAction
-    quantity: float
+    quantity: float = Field(gt=0)
     order_type: OrderType = OrderType.LIMIT
-    limit_price: float | None = None
-    stop_price: float | None = None
-    trailing_percent: float | None = None
+    limit_price: float | None = Field(default=None, gt=0)
+    stop_price: float | None = Field(default=None, gt=0)
+    trailing_percent: float | None = Field(default=None, gt=0, le=100)
 
     # Bracket order components
-    take_profit_price: float | None = None
-    stop_loss_price: float | None = None
+    take_profit_price: float | None = Field(default=None, gt=0)
+    stop_loss_price: float | None = Field(default=None, gt=0)
 
     # Reference price for market orders (last quote, used for risk estimation)
-    reference_price: float | None = None
+    reference_price: float | None = Field(default=None, gt=0)
 
     # Metadata
     reason: str = ""
-    time_in_force: str = "DAY"
+    time_in_force: TimeInForce = TimeInForce.DAY
+
+    @field_validator("symbol")
+    @classmethod
+    def _normalize_order_symbol(cls, value: str) -> str:
+        symbol = value.strip().upper()
+        if not symbol:
+            raise ValueError("symbol must not be empty")
+        return symbol
+
+    @model_validator(mode="after")
+    def _validate_order(self) -> OrderSpec:
+        if self.order_type == OrderType.LIMIT and self.limit_price is None:
+            raise ValueError("limit orders require limit_price")
+        if self.order_type == OrderType.STOP and self.stop_price is None:
+            raise ValueError("stop orders require stop_price")
+        if (
+            self.order_type == OrderType.STOP_LIMIT
+            and (self.limit_price is None or self.stop_price is None)
+        ):
+            raise ValueError("stop_limit orders require both limit_price and stop_price")
+        if self.order_type == OrderType.TRAILING_STOP and self.trailing_percent is None:
+            raise ValueError("trailing_stop orders require trailing_percent")
+        if self.order_type != OrderType.TRAILING_STOP and self.trailing_percent is not None:
+            raise ValueError("trailing_percent is only valid for trailing_stop orders")
+
+        if self.take_profit_price is not None and self.stop_loss_price is None:
+            raise ValueError(
+                "bracket orders require both take_profit_price and stop_loss_price"
+            )
+
+        entry_price = self.limit_price or self.stop_price or self.reference_price
+        if entry_price is not None and self.stop_loss_price is not None:
+            if self.action == OrderAction.BUY and self.stop_loss_price >= entry_price:
+                raise ValueError("long stop_loss_price must be below the entry price")
+            if self.action == OrderAction.SELL and self.stop_loss_price <= entry_price:
+                raise ValueError("short stop_loss_price must be above the entry price")
+        if entry_price is not None and self.take_profit_price is not None:
+            if self.action == OrderAction.BUY and self.take_profit_price <= entry_price:
+                raise ValueError("long take_profit_price must be above the entry price")
+            if self.action == OrderAction.SELL and self.take_profit_price >= entry_price:
+                raise ValueError("short take_profit_price must be below the entry price")
+
+        return self
 
 
 class OrderResult(BaseModel):
@@ -126,7 +184,7 @@ class OrderResult(BaseModel):
     quantity: float
     status: str
     filled_price: float | None = None
-    filled_quantity: float = 0.0
+    filled_quantity: float = Field(default=0.0, ge=0)
     timestamp: datetime = Field(default_factory=datetime.now)
 
 
@@ -193,15 +251,40 @@ class TradeJournalEntry(BaseModel):
     direction: Direction
     entry_price: float | None = None
     exit_price: float | None = None
-    shares: float = 0.0
+    shares: float = Field(default=0.0, ge=0)
+    open_shares: float = Field(default=0.0, ge=0)
     entry_date: datetime | None = None
     exit_date: datetime | None = None
+    parent_trade_id: int | None = None
     thesis: str = ""
     claude_analysis: str = ""
     outcome: TradeOutcome = TradeOutcome.OPEN
     pnl: float = 0.0
     notes: str = ""
     tags: list[str] = Field(default_factory=list)
+
+    @field_validator("ticker")
+    @classmethod
+    def _normalize_ticker(cls, value: str) -> str:
+        ticker = value.strip().upper()
+        if not ticker:
+            raise ValueError("ticker must not be empty")
+        return ticker
+
+    @model_validator(mode="after")
+    def _validate_lot_state(self) -> TradeJournalEntry:
+        if self.outcome == TradeOutcome.OPEN:
+            if self.shares <= 0:
+                raise ValueError("open trades require shares > 0")
+            if self.open_shares == 0:
+                self.open_shares = self.shares
+        else:
+            if self.shares <= 0:
+                raise ValueError("closed trades require shares > 0")
+            self.open_shares = 0.0
+        if self.open_shares > self.shares:
+            raise ValueError("open_shares cannot exceed shares")
+        return self
 
 
 class PortfolioSnapshot(BaseModel):

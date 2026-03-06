@@ -29,11 +29,9 @@ Every recommendation should include a clear stop-loss level and risk boundary.
 These rules are non-negotiable. If a trade would violate any of these, flag it:
 
 - Maximum single position: {max_position_pct}% of portfolio
-- Maximum sector concentration: {max_sector_pct}% of portfolio
 - Maximum daily loss trigger: {max_daily_loss_pct}% of portfolio
 - Maximum leverage: {max_leverage}x
 - Stop-loss required on every position
-- No naked options unless explicitly enabled
 
 ## Response Style
 
@@ -57,14 +55,12 @@ Use null/None for fields you genuinely cannot determine rather than guessing.
 
 def build_system_prompt(
     max_position_pct: float = 40.0,
-    max_sector_pct: float = 60.0,
     max_daily_loss_pct: float = 5.0,
     max_leverage: float = 2.0,
 ) -> str:
     """Build the system prompt with risk parameters filled in."""
     return TRADING_SYSTEM_PROMPT.format(
         max_position_pct=max_position_pct,
-        max_sector_pct=max_sector_pct,
         max_daily_loss_pct=max_daily_loss_pct,
         max_leverage=max_leverage,
     )

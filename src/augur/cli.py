@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import click
+from pydantic import ValidationError
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -19,7 +20,6 @@ from augur.journal import Journal
 from augur.models import (
     AccountSummary,
     AnalysisLogEntry,
-    Direction,
     OrderAction,
     OrderResult,
     OrderSpec,
@@ -28,7 +28,7 @@ from augur.models import (
     TradeOutcome,
     WatchlistItem,
 )
-from augur.risk import RiskManager
+from augur.risk import RiskManager, classify_order_exposure
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -342,21 +342,33 @@ def _trade_flow(
     console.print(f"[dim]Building {direction_str} order for {ticker}...[/dim]")
 
     try:
-        order_spec = analyst.construct_order(ticker, direction_str, portfolio=portfolio)
+        candidate = analyst.construct_order(
+            ticker, direction_str, portfolio=portfolio
+        ).model_dump()
     except AnalystError as e:
         console.print(f"[red]Analysis error:[/red] {e}")
         sys.exit(1)
 
-    # Override with user-specified values
+    # User intent is authoritative; validate the final reviewed order after overrides.
+    candidate["symbol"] = ticker
+    candidate["action"] = action
     if shares is not None:
-        order_spec.quantity = shares
+        candidate["quantity"] = shares
     if limit_price is not None:
-        order_spec.limit_price = limit_price
-        order_spec.order_type = OrderType.LIMIT
+        candidate["limit_price"] = limit_price
+        candidate["order_type"] = OrderType.LIMIT
 
-    # Set reference price from live quote for market order risk estimation
     if quote.last_price > 0:
-        order_spec.reference_price = quote.last_price
+        candidate["reference_price"] = quote.last_price
+
+    try:
+        order_spec = OrderSpec.model_validate(candidate)
+    except ValidationError as e:
+        console.print("[red]Invalid order returned for review:[/red]")
+        for error in e.errors():
+            location = ".".join(str(part) for part in error["loc"])
+            console.print(f"  [red]- {location}:[/red] {error['msg']}")
+        sys.exit(1)
 
     # Display the order
     console.print()
@@ -419,39 +431,28 @@ def _trade_flow(
     entry_price = (
         primary_result.filled_price
         or order_spec.limit_price
+        or order_spec.stop_price
         or order_spec.reference_price
     )
-
-    # Determine direction: selling an existing long is not a short trade
-    if action == OrderAction.SELL:
-        open_trades = j.get_trades_by_ticker(ticker)
-        open_long = next(
-            (
-                t
-                for t in open_trades
-                if t.outcome == TradeOutcome.OPEN and t.direction == Direction.LONG
-            ),
-            None,
+    if entry_price is None:
+        console.print(
+            "[yellow]Warning:[/yellow] Filled order has no usable fill price "
+            "for journal."
         )
-        if open_long and open_long.id is not None:
-            # Close the existing long trade instead of opening a new short
-            j.close_trade(open_long.id, exit_price=entry_price or 0.0, notes=order_spec.reason)
-            console.print("[dim]Existing long trade closed in journal.[/dim]")
-            return
+        return
 
-    # No existing long to close — log as new trade
-    direction = Direction.LONG if action == OrderAction.BUY else Direction.SHORT
-    j.add_trade(
-        TradeJournalEntry(
-            ticker=ticker,
-            direction=direction,
-            entry_price=entry_price,
-            shares=order_spec.quantity,
-            entry_date=datetime.now(),
-            thesis=order_spec.reason,
-        )
+    realized = _journal_fills(
+        journal=j,
+        ticker=ticker,
+        action=action,
+        filled_quantity=primary_result.filled_quantity,
+        fill_price=entry_price,
+        order_spec=order_spec,
+        portfolio=portfolio,
     )
-    console.print("[dim]Trade logged to journal.[/dim]")
+    if realized:
+        entry_label = "entry" if realized == 1 else "entries"
+        console.print(f"[dim]{realized} journal {entry_label} updated.[/dim]")
 
 
 async def _get_portfolio_and_quote(
@@ -496,14 +497,63 @@ def _display_order(spec: OrderSpec) -> None:
         table.add_row("Limit Price", f"${spec.limit_price:,.2f}")
     if spec.stop_price:
         table.add_row("Stop Price", f"${spec.stop_price:,.2f}")
+    if spec.trailing_percent:
+        table.add_row("Trailing %", f"{spec.trailing_percent:.2f}%")
     if spec.take_profit_price:
         table.add_row("Take Profit", f"${spec.take_profit_price:,.2f}")
     if spec.stop_loss_price:
         table.add_row("Stop Loss", f"${spec.stop_loss_price:,.2f}")
+    table.add_row("TIF", spec.time_in_force.value)
     if spec.reason:
         table.add_row("Reason", spec.reason)
 
     console.print(table)
+
+
+def _journal_fills(
+    journal: Journal,
+    ticker: str,
+    action: OrderAction,
+    filled_quantity: float,
+    fill_price: float,
+    order_spec: OrderSpec,
+    portfolio: AccountSummary,
+) -> int:
+    filled_spec = order_spec.model_copy(update={"quantity": filled_quantity})
+    exposure = classify_order_exposure(filled_spec, portfolio, quantity=filled_quantity)
+    updates = 0
+
+    if exposure.reducing_quantity > 0 and exposure.reducing_direction is not None:
+        closed_lots = journal.close_position(
+            ticker=ticker,
+            direction=exposure.reducing_direction,
+            shares=exposure.reducing_quantity,
+            exit_price=fill_price,
+            notes=order_spec.reason,
+        )
+        updates += len(closed_lots)
+        closed_quantity = sum(lot.shares for lot in closed_lots)
+        if closed_quantity < exposure.reducing_quantity:
+            console.print(
+                "[yellow]Warning:[/yellow] Journal had fewer open lots than the broker "
+                "position being reduced."
+            )
+
+    if exposure.opening_quantity > 0 and exposure.opening_direction is not None:
+        journal.add_trade(
+            TradeJournalEntry(
+                ticker=ticker,
+                direction=exposure.opening_direction,
+                entry_price=fill_price,
+                shares=exposure.opening_quantity,
+                open_shares=exposure.opening_quantity,
+                entry_date=datetime.now(),
+                thesis=order_spec.reason,
+            )
+        )
+        updates += 1
+
+    return updates
 
 
 # --- Risk ---

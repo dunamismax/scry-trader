@@ -1,5 +1,7 @@
 """Tests for Pydantic models."""
 
+import pytest
+
 from augur.models import (
     AccountSummary,
     ConvictionLevel,
@@ -9,7 +11,10 @@ from augur.models import (
     OrderType,
     Position,
     RiskLevel,
+    TimeInForce,
     TradeAnalysis,
+    TradeJournalEntry,
+    TradeOutcome,
 )
 
 
@@ -40,7 +45,7 @@ class TestPosition:
 class TestOrderSpec:
     def test_basic_order(self) -> None:
         order = OrderSpec(
-            symbol="AAPL",
+            symbol=" aapl ",
             action=OrderAction.BUY,
             quantity=100,
             order_type=OrderType.LIMIT,
@@ -63,6 +68,75 @@ class TestOrderSpec:
         )
         assert order.take_profit_price == 330.0
         assert order.stop_loss_price == 285.0
+
+    def test_invalid_negative_quantity_fails(self) -> None:
+        with pytest.raises(ValueError, match="greater than 0"):
+            OrderSpec(
+                symbol="AAPL",
+                action=OrderAction.BUY,
+                quantity=-1,
+                order_type=OrderType.MARKET,
+                reference_price=150.0,
+                stop_loss_price=140.0,
+            )
+
+    def test_inverted_long_bracket_fails(self) -> None:
+        with pytest.raises(ValueError, match="take_profit_price"):
+            OrderSpec(
+                symbol="AAPL",
+                action=OrderAction.BUY,
+                quantity=10,
+                order_type=OrderType.LIMIT,
+                limit_price=150.0,
+                take_profit_price=145.0,
+                stop_loss_price=140.0,
+            )
+
+    def test_trailing_stop_requires_trailing_percent(self) -> None:
+        with pytest.raises(ValueError, match="trailing_percent"):
+            OrderSpec(
+                symbol="AAPL",
+                action=OrderAction.SELL,
+                quantity=10,
+                order_type=OrderType.TRAILING_STOP,
+            )
+
+    def test_time_in_force_is_validated(self) -> None:
+        order = OrderSpec(
+            symbol="AAPL",
+            action=OrderAction.BUY,
+            quantity=10,
+            order_type=OrderType.LIMIT,
+            limit_price=150.0,
+            stop_loss_price=140.0,
+            time_in_force=TimeInForce.GTC,
+        )
+        assert order.time_in_force == TimeInForce.GTC
+
+
+class TestTradeJournalEntry:
+    def test_open_trade_defaults_open_shares_to_shares(self) -> None:
+        entry = TradeJournalEntry(
+            ticker="aapl",
+            direction=Direction.LONG,
+            entry_price=100.0,
+            shares=5,
+            outcome=TradeOutcome.OPEN,
+        )
+        assert entry.ticker == "AAPL"
+        assert entry.open_shares == 5
+
+    def test_closed_trade_forces_open_shares_zero(self) -> None:
+        entry = TradeJournalEntry(
+            ticker="TSLA",
+            direction=Direction.SHORT,
+            entry_price=200.0,
+            exit_price=180.0,
+            shares=5,
+            outcome=TradeOutcome.WIN,
+            open_shares=1,
+        )
+        assert entry.open_shares == 0.0
 
 
 class TestTradeAnalysis:

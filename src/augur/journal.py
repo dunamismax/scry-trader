@@ -22,8 +22,10 @@ CREATE TABLE IF NOT EXISTS trades (
     entry_price REAL,
     exit_price REAL,
     shares REAL,
+    open_shares REAL DEFAULT 0.0,
     entry_date TEXT,
     exit_date TEXT,
+    parent_trade_id INTEGER,
     thesis TEXT,
     claude_analysis TEXT,
     outcome TEXT DEFAULT 'open',
@@ -58,8 +60,10 @@ _TRADE_COLUMNS = [
     "entry_price",
     "exit_price",
     "shares",
+    "open_shares",
     "entry_date",
     "exit_date",
+    "parent_trade_id",
     "thesis",
     "claude_analysis",
     "outcome",
@@ -80,6 +84,7 @@ class Journal:
     def _init_db(self) -> None:
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrate_trades_schema(conn)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -91,42 +96,32 @@ class Journal:
     def add_trade(self, entry: TradeJournalEntry) -> int:
         """Record a new trade. Returns the trade ID."""
         with self._connect() as conn:
-            cursor = conn.execute(
-                """INSERT INTO trades
-                (ticker, direction, entry_price, exit_price, shares,
-                 entry_date, exit_date, thesis, claude_analysis, outcome, pnl, notes, tags)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    entry.ticker,
-                    entry.direction.value,
-                    entry.entry_price,
-                    entry.exit_price,
-                    entry.shares,
-                    entry.entry_date.isoformat() if entry.entry_date else None,
-                    entry.exit_date.isoformat() if entry.exit_date else None,
-                    entry.thesis,
-                    entry.claude_analysis,
-                    entry.outcome.value,
-                    entry.pnl,
-                    entry.notes,
-                    ",".join(entry.tags) if entry.tags else "",
-                ),
-            )
-            return cursor.lastrowid or 0
+            return self._insert_trade(conn, entry)
 
     def close_trade(
-        self, trade_id: int, exit_price: float, notes: str = ""
+        self,
+        trade_id: int,
+        exit_price: float,
+        notes: str = "",
+        shares: float | None = None,
     ) -> TradeJournalEntry | None:
-        """Close an open trade with exit price and calculate P&L."""
+        """Close all or part of an open trade lot and calculate realized P&L."""
         trade = self.get_trade(trade_id)
         if trade is None:
             return None
+        if trade.outcome != TradeOutcome.OPEN or trade.open_shares <= 0:
+            return trade
+
+        remaining_shares = trade.open_shares
+        close_shares = remaining_shares if shares is None else min(shares, remaining_shares)
+        if close_shares <= 0:
+            raise ValueError("shares to close must be positive")
 
         entry_price = trade.entry_price or 0.0
         if trade.direction == Direction.LONG:
-            pnl = (exit_price - entry_price) * trade.shares
+            pnl = (exit_price - entry_price) * close_shares
         else:
-            pnl = (entry_price - exit_price) * trade.shares
+            pnl = (entry_price - exit_price) * close_shares
 
         if pnl > 0:
             outcome = TradeOutcome.WIN
@@ -136,10 +131,38 @@ class Journal:
             outcome = TradeOutcome.BREAKEVEN
 
         with self._connect() as conn:
+            if close_shares < remaining_shares:
+                remaining_after = remaining_shares - close_shares
+                conn.execute(
+                    """UPDATE trades
+                    SET shares = ?, open_shares = ?
+                    WHERE id = ?""",
+                    (
+                        remaining_after,
+                        remaining_after,
+                        trade_id,
+                    ),
+                )
+                closed_trade = trade.model_copy(
+                    update={
+                        "id": None,
+                        "shares": close_shares,
+                        "open_shares": 0.0,
+                        "exit_price": exit_price,
+                        "exit_date": datetime.now(),
+                        "parent_trade_id": trade.id,
+                        "outcome": outcome,
+                        "pnl": pnl,
+                        "notes": _merge_notes(trade.notes, notes),
+                    }
+                )
+                closed_trade_id = self._insert_trade(conn, closed_trade)
+                return self._get_trade(conn, closed_trade_id)
+
             if notes:
                 conn.execute(
                     """UPDATE trades
-                    SET exit_price = ?, exit_date = ?, outcome = ?, pnl = ?,
+                    SET exit_price = ?, exit_date = ?, outcome = ?, pnl = ?, open_shares = 0.0,
                         notes = CASE WHEN notes IS NOT NULL AND notes != ''
                                      THEN notes || '\n' || ?
                                      ELSE ? END
@@ -157,12 +180,41 @@ class Journal:
             else:
                 conn.execute(
                     """UPDATE trades
-                    SET exit_price = ?, exit_date = ?, outcome = ?, pnl = ?
+                    SET exit_price = ?, exit_date = ?, outcome = ?, pnl = ?, open_shares = 0.0
                     WHERE id = ?""",
                     (exit_price, datetime.now().isoformat(), outcome.value, pnl, trade_id),
                 )
 
         return self.get_trade(trade_id)
+
+    def close_position(
+        self,
+        ticker: str,
+        direction: Direction,
+        shares: float,
+        exit_price: float,
+        notes: str = "",
+    ) -> list[TradeJournalEntry]:
+        """Close a position across open lots using FIFO matching."""
+        if shares <= 0:
+            raise ValueError("shares to close must be positive")
+
+        remaining = shares
+        closed: list[TradeJournalEntry] = []
+        for lot in self.get_open_lots(ticker=ticker, direction=direction):
+            if remaining <= 0:
+                break
+            lot_close = min(lot.open_shares, remaining)
+            realized = self.close_trade(
+                lot.id or 0,
+                exit_price=exit_price,
+                notes=notes,
+                shares=lot_close,
+            )
+            if realized is not None:
+                closed.append(realized)
+            remaining -= lot_close
+        return closed
 
     def get_trade(self, trade_id: int) -> TradeJournalEntry | None:
         """Get a single trade by ID."""
@@ -176,9 +228,32 @@ class Journal:
         """Get all open trades."""
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM trades WHERE outcome = 'open' ORDER BY entry_date DESC"
+                """SELECT * FROM trades
+                WHERE outcome = 'open' AND open_shares > 0
+                ORDER BY entry_date DESC, id DESC"""
             ).fetchall()
             return [_row_to_trade(r) for r in rows]
+
+    def get_open_lots(
+        self,
+        ticker: str | None = None,
+        direction: Direction | None = None,
+    ) -> list[TradeJournalEntry]:
+        """Get currently open lots, optionally filtered by ticker and direction."""
+        query = [
+            "SELECT * FROM trades WHERE outcome = 'open' AND open_shares > 0"
+        ]
+        params: list[str] = []
+        if ticker is not None:
+            query.append("AND ticker = ?")
+            params.append(ticker.upper())
+        if direction is not None:
+            query.append("AND direction = ?")
+            params.append(direction.value)
+        query.append("ORDER BY entry_date ASC, id ASC")
+        with self._connect() as conn:
+            rows = conn.execute(" ".join(query), params).fetchall()
+        return [_row_to_trade(r) for r in rows]
 
     def get_recent_trades(self, limit: int = 20) -> list[TradeJournalEntry]:
         """Get recent trades, newest first."""
@@ -205,7 +280,7 @@ class Journal:
                 0
             ]
             open_count = conn.execute(
-                "SELECT COUNT(*) FROM trades WHERE outcome = 'open'"
+                "SELECT COUNT(*) FROM trades WHERE outcome = 'open' AND open_shares > 0"
             ).fetchone()[0]
             total_pnl = conn.execute(
                 "SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE outcome != 'open'"
@@ -287,6 +362,56 @@ class Journal:
             )
             return cursor.lastrowid or 0
 
+    def _insert_trade(self, conn: sqlite3.Connection, entry: TradeJournalEntry) -> int:
+        cursor = conn.execute(
+            """INSERT INTO trades
+            (ticker, direction, entry_price, exit_price, shares, open_shares,
+             entry_date, exit_date, parent_trade_id, thesis, claude_analysis,
+             outcome, pnl, notes, tags)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                entry.ticker,
+                entry.direction.value,
+                entry.entry_price,
+                entry.exit_price,
+                entry.shares,
+                entry.open_shares,
+                entry.entry_date.isoformat() if entry.entry_date else None,
+                entry.exit_date.isoformat() if entry.exit_date else None,
+                entry.parent_trade_id,
+                entry.thesis,
+                entry.claude_analysis,
+                entry.outcome.value,
+                entry.pnl,
+                entry.notes,
+                ",".join(entry.tags) if entry.tags else "",
+            ),
+        )
+        return cursor.lastrowid or 0
+
+    def _migrate_trades_schema(self, conn: sqlite3.Connection) -> None:
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(trades)").fetchall()
+        }
+        if "open_shares" not in columns:
+            conn.execute("ALTER TABLE trades ADD COLUMN open_shares REAL DEFAULT 0.0")
+        if "parent_trade_id" not in columns:
+            conn.execute("ALTER TABLE trades ADD COLUMN parent_trade_id INTEGER")
+        conn.execute(
+            """UPDATE trades
+            SET open_shares = CASE
+                WHEN outcome = 'open' THEN COALESCE(NULLIF(shares, 0), 0)
+                ELSE 0.0
+            END
+            WHERE open_shares IS NULL OR open_shares = 0.0"""
+        )
+
+    def _get_trade(self, conn: sqlite3.Connection, trade_id: int) -> TradeJournalEntry | None:
+        row = conn.execute("SELECT * FROM trades WHERE id = ?", (trade_id,)).fetchone()
+        if row is None:
+            return None
+        return _row_to_trade(row)
+
 
 def _row_to_trade(row: sqlite3.Row) -> TradeJournalEntry:
     """Convert a database row to a TradeJournalEntry."""
@@ -297,8 +422,10 @@ def _row_to_trade(row: sqlite3.Row) -> TradeJournalEntry:
         entry_price=row["entry_price"],
         exit_price=row["exit_price"],
         shares=row["shares"] or 0.0,
+        open_shares=row["open_shares"] or 0.0,
         entry_date=datetime.fromisoformat(row["entry_date"]) if row["entry_date"] else None,
         exit_date=datetime.fromisoformat(row["exit_date"]) if row["exit_date"] else None,
+        parent_trade_id=row["parent_trade_id"],
         thesis=row["thesis"] or "",
         claude_analysis=row["claude_analysis"] or "",
         outcome=TradeOutcome(row["outcome"]) if row["outcome"] else TradeOutcome.OPEN,
@@ -306,3 +433,9 @@ def _row_to_trade(row: sqlite3.Row) -> TradeJournalEntry:
         notes=row["notes"] or "",
         tags=row["tags"].split(",") if row["tags"] else [],
     )
+
+
+def _merge_notes(existing: str, update: str) -> str:
+    if existing and update:
+        return f"{existing}\n{update}"
+    return existing or update

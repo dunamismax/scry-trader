@@ -54,7 +54,6 @@ class Analyst:
         self.backend = claude_config.backend
         self.system_prompt = build_system_prompt(
             max_position_pct=risk_config.max_position_pct,
-            max_sector_pct=risk_config.max_sector_pct,
             max_daily_loss_pct=risk_config.max_daily_loss_pct,
             max_leverage=risk_config.max_leverage,
         )
@@ -239,8 +238,40 @@ class Analyst:
     # ------------------------------------------------------------------
 
     def _cli_env(self) -> dict[str, str]:
-        """Build env for CLI subprocess. Strips CLAUDECODE to avoid nested-session error."""
-        return {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+        """Build a minimal env for the Claude CLI subprocess."""
+        allowed_keys = {
+            "ALL_PROXY",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL",
+            "CLAUDE_API_KEY",
+            "CLAUDE_CONFIG_DIR",
+            "COLORTERM",
+            "HOME",
+            "HTTPS_PROXY",
+            "HTTP_PROXY",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "LOGNAME",
+            "NO_COLOR",
+            "NO_PROXY",
+            "PATH",
+            "SHELL",
+            "SSL_CERT_DIR",
+            "SSL_CERT_FILE",
+            "TERM",
+            "TMPDIR",
+            "USER",
+            "XDG_CACHE_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+        }
+        env: dict[str, str] = {}
+        for key in allowed_keys:
+            value = os.environ.get(key)
+            if value:
+                env[key] = value
+        return env
 
     def _cli_run(self, cmd: list[str], prompt: str) -> str:
         """Run a ``claude`` CLI command and return stdout."""

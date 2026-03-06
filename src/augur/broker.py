@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import math
 from typing import TYPE_CHECKING, Any
@@ -22,6 +21,7 @@ from ib_async import (
 
 from augur.models import (
     AccountSummary,
+    OrderAction,
     OrderResult,
     OrderSpec,
     OrderType,
@@ -91,7 +91,7 @@ class Broker:
     async def get_positions(self) -> list[Position]:
         """Fetch all current positions."""
         self._require_connection()
-        ib_positions = self.ib.positions()
+        ib_positions = self.ib.positions(self.config.account)
         positions: list[Position] = []
         for p in ib_positions:
             positions.append(
@@ -107,7 +107,9 @@ class Broker:
     async def get_account_summary(self) -> AccountSummary:
         """Fetch account summary with positions and values."""
         self._require_connection()
-        account_values = self.ib.accountSummary()
+        account_values = await self.ib.accountSummaryAsync(self.config.account)
+        if self.config.account and not account_values:
+            raise BrokerError(f"IB account '{self.config.account}' was not found")
 
         summary = AccountSummary()
         for av in account_values:
@@ -136,17 +138,7 @@ class Broker:
         self._require_connection()
         contract = Stock(symbol, "SMART", "USD")
         await self.ib.qualifyContractsAsync(contract)
-        ticker = self.ib.reqMktData(contract, snapshot=True)
-
-        try:
-            await asyncio.wait_for(
-                self.ib.updateEvent.wait(),
-                timeout=_DATA_TIMEOUT,
-            )
-        except TimeoutError:
-            logger.warning("Timed out waiting for quote data for %s", symbol)
-
-        self.ib.cancelMktData(contract)
+        ticker = (await self.ib.reqTickersAsync(contract))[0]
 
         last = _safe_float(ticker.last)
         close = _safe_float(ticker.close)
@@ -165,23 +157,10 @@ class Broker:
         self._require_connection()
         contracts = [Stock(s, "SMART", "USD") for s in symbols]
         await self.ib.qualifyContractsAsync(*contracts)
-
-        tickers: list[Ticker] = []
-        for c in contracts:
-            tickers.append(self.ib.reqMktData(c, snapshot=True))
-
-        try:
-            await asyncio.wait_for(
-                self.ib.updateEvent.wait(),
-                timeout=_DATA_TIMEOUT,
-            )
-        except TimeoutError:
-            logger.warning("Timed out waiting for quote data")
+        tickers: list[Ticker] = await self.ib.reqTickersAsync(*contracts)
 
         items: list[WatchlistItem] = []
         for symbol, ticker in zip(symbols, tickers, strict=True):
-            if ticker.contract:
-                self.ib.cancelMktData(ticker.contract)
             last = _safe_float(ticker.last)
             close = _safe_float(ticker.close)
             items.append(
@@ -204,15 +183,9 @@ class Broker:
         self._require_connection()
         stock = Stock(symbol, "SMART", "USD")
         await self.ib.qualifyContractsAsync(stock)
-        chains = self.ib.reqSecDefOptParams(stock.symbol, "", stock.secType, stock.conId)
-
-        try:
-            await asyncio.wait_for(
-                self.ib.updateEvent.wait(),
-                timeout=_DATA_TIMEOUT,
-            )
-        except TimeoutError:
-            logger.warning("Timed out waiting for options chain data for %s", symbol)
+        chains = await self.ib.reqSecDefOptParamsAsync(
+            stock.symbol, "", stock.secType, stock.conId
+        )
 
         results: list[dict[str, Any]] = []
         for chain in chains:
@@ -234,26 +207,10 @@ class Broker:
         await self.ib.qualifyContractsAsync(contract)
 
         order = _build_order(spec)
+        _apply_order_metadata(order, spec, self.config.account)
         trade: Trade = self.ib.placeOrder(contract, order)
-
-        # Wait for fill or acknowledgment via event
-        try:
-            await asyncio.wait_for(
-                self.ib.updateEvent.wait(),
-                timeout=_DATA_TIMEOUT,
-            )
-        except TimeoutError:
-            logger.warning("Timed out waiting for order acknowledgment")
-
-        return OrderResult(
-            order_id=trade.order.orderId,
-            symbol=spec.symbol,
-            action=spec.action,
-            quantity=spec.quantity,
-            status=trade.orderStatus.status,
-            filled_price=(trade.orderStatus.avgFillPrice or None),
-            filled_quantity=trade.orderStatus.filled,
-        )
+        await _wait_for_trade_update(trade, symbol=spec.symbol)
+        return _trade_to_result(trade, spec.symbol, spec.quantity)
 
     async def submit_bracket_order(self, spec: OrderSpec) -> list[OrderResult]:
         """Submit a bracket order (entry + take-profit + stop-loss)."""
@@ -263,52 +220,54 @@ class Broker:
 
         contract = Stock(spec.symbol, "SMART", "USD")
         await self.ib.qualifyContractsAsync(contract)
+        parent = _build_order(spec)
+        reverse_action = OrderAction.BUY if spec.action == OrderAction.SELL else OrderAction.SELL
+        parent.orderId = self.ib.client.getReqId()
+        parent.transmit = False
+        _apply_order_metadata(parent, spec, self.config.account)
 
-        # Bracket orders require a valid limit price for the parent entry.
-        # Market-style entries (no limit_price) are incompatible with brackets;
-        # use the reference_price as a reasonable limit, or reject.
-        parent_price = spec.limit_price or spec.reference_price
-        if not parent_price or parent_price <= 0:
-            raise BrokerError(
-                "Bracket orders require a limit_price or reference_price "
-                "for the parent entry order. Market orders without a price "
-                "reference cannot be submitted as brackets."
-            )
-
-        bracket = self.ib.bracketOrder(
-            action=spec.action.value,
-            quantity=spec.quantity,
-            limitPrice=parent_price,
-            takeProfitPrice=spec.take_profit_price,
-            stopLossPrice=spec.stop_loss_price,
+        take_profit = LimitOrder(
+            reverse_action.value,
+            spec.quantity,
+            spec.take_profit_price,
+            orderId=self.ib.client.getReqId(),
+            parentId=parent.orderId,
+            transmit=False,
         )
+        _apply_order_metadata(take_profit, spec, self.config.account)
 
-        results: list[OrderResult] = []
-        for order in bracket:
-            trade = self.ib.placeOrder(contract, order)
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(
-                    self.ib.updateEvent.wait(),
-                    timeout=_DATA_TIMEOUT,
-                )
-            results.append(
-                OrderResult(
-                    order_id=trade.order.orderId,
-                    symbol=spec.symbol,
-                    action=spec.action,
-                    quantity=spec.quantity,
-                    status=trade.orderStatus.status,
-                )
-            )
-        return results
+        stop_loss = StopOrder(
+            reverse_action.value,
+            spec.quantity,
+            spec.stop_loss_price,
+            orderId=self.ib.client.getReqId(),
+            parentId=parent.orderId,
+            transmit=True,
+        )
+        _apply_order_metadata(stop_loss, spec, self.config.account)
+
+        parent_trade = self.ib.placeOrder(contract, parent)
+        take_profit_trade = self.ib.placeOrder(contract, take_profit)
+        stop_loss_trade = self.ib.placeOrder(contract, stop_loss)
+
+        await _wait_for_trade_update(parent_trade, symbol=spec.symbol)
+
+        return [
+            _trade_to_result(parent_trade, spec.symbol, spec.quantity),
+            _trade_to_result(take_profit_trade, spec.symbol, spec.quantity),
+            _trade_to_result(stop_loss_trade, spec.symbol, spec.quantity),
+        ]
 
     async def cancel_order(self, order_id: int) -> None:
         """Cancel an open order."""
         self._require_connection()
         for trade in self.ib.openTrades():
-            if trade.order.orderId == order_id:
-                self.ib.cancelOrder(trade.order)
-                return
+            if trade.order.orderId != order_id:
+                continue
+            if self.config.account and trade.order.account != self.config.account:
+                continue
+            self.ib.cancelOrder(trade.order)
+            return
         raise BrokerError(f"Order {order_id} not found in open orders")
 
 
@@ -319,20 +278,27 @@ def _build_order(spec: OrderSpec) -> Order:
 
     if spec.order_type == OrderType.MARKET:
         return MarketOrder(action, qty)
-    elif spec.order_type == OrderType.LIMIT:
+    if spec.order_type == OrderType.LIMIT:
         if spec.limit_price is None:
             raise BrokerError("Limit order requires limit_price")
         return LimitOrder(action, qty, spec.limit_price)
-    elif spec.order_type == OrderType.STOP:
+    if spec.order_type == OrderType.STOP:
         if spec.stop_price is None:
             raise BrokerError("Stop order requires stop_price")
         return StopOrder(action, qty, spec.stop_price)
-    elif spec.order_type == OrderType.STOP_LIMIT:
+    if spec.order_type == OrderType.STOP_LIMIT:
         if spec.limit_price is None or spec.stop_price is None:
             raise BrokerError("Stop-limit order requires both limit_price and stop_price")
         return StopLimitOrder(action, qty, spec.limit_price, spec.stop_price)
-    else:
-        raise BrokerError(f"Unsupported order type: {spec.order_type}")
+    if spec.order_type == OrderType.TRAILING_STOP:
+        if spec.trailing_percent is None:
+            raise BrokerError("Trailing-stop order requires trailing_percent")
+        order = Order(action=action, totalQuantity=qty, orderType="TRAIL")
+        order.trailingPercent = spec.trailing_percent
+        if spec.stop_price is not None:
+            order.trailStopPrice = spec.stop_price
+        return order
+    raise BrokerError(f"Unsupported order type: {spec.order_type}")
 
 
 def _safe_float(value: Any) -> float:
@@ -346,3 +312,44 @@ def _safe_float(value: Any) -> float:
         return f
     except (ValueError, TypeError):
         return 0.0
+
+
+def _apply_order_metadata(order: Order, spec: OrderSpec, account: str) -> None:
+    """Apply cross-cutting metadata to every outbound order."""
+    order.tif = spec.time_in_force.value
+    if account:
+        order.account = account
+
+
+async def _wait_for_trade_update(trade: Trade, symbol: str) -> None:
+    """Wait until a trade has either meaningful status or a terminal outcome."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _DATA_TIMEOUT
+    while True:
+        if _trade_has_meaningful_update(trade):
+            return
+        if loop.time() >= deadline:
+            logger.warning("Timed out waiting for order status for %s", symbol)
+            return
+        await asyncio.sleep(0.05)
+
+
+def _trade_has_meaningful_update(trade: Trade) -> bool:
+    status = trade.orderStatus.status
+    if trade.filled() > 0:
+        return True
+    if trade.isDone():
+        return True
+    return status not in {"", "ApiPending", "PendingSubmit"}
+
+
+def _trade_to_result(trade: Trade, symbol: str, quantity: float) -> OrderResult:
+    return OrderResult(
+        order_id=trade.order.orderId,
+        symbol=symbol,
+        action=OrderAction(trade.order.action),
+        quantity=quantity,
+        status=trade.orderStatus.status,
+        filled_price=(_safe_float(trade.orderStatus.avgFillPrice) or None),
+        filled_quantity=_safe_float(trade.filled()),
+    )

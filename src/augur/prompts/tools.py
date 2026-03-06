@@ -149,12 +149,17 @@ TRADING_TOOLS: list[dict[str, Any]] = [
                 "quantity": {"type": "number"},
                 "order_type": {
                     "type": "string",
-                    "enum": ["market", "limit", "stop", "stop_limit"],
+                    "enum": ["market", "limit", "stop", "stop_limit", "trailing_stop"],
                 },
                 "limit_price": {"type": "number"},
                 "stop_price": {"type": "number"},
+                "trailing_percent": {"type": "number"},
                 "take_profit_price": {"type": "number"},
                 "stop_loss_price": {"type": "number"},
+                "time_in_force": {
+                    "type": "string",
+                    "enum": ["DAY", "GTC", "IOC", "FOK"],
+                },
                 "reason": {"type": "string"},
             },
             "required": ["symbol", "action", "quantity", "order_type", "reason"],

@@ -44,6 +44,7 @@ class TestTradeOperations:
         assert trade.direction == Direction.LONG
         assert trade.entry_price == 150.0
         assert trade.shares == 100
+        assert trade.open_shares == 100
         assert trade.outcome == TradeOutcome.OPEN
 
     def test_close_trade_win(self, journal: Journal, sample_trade: TradeJournalEntry) -> None:
@@ -54,6 +55,7 @@ class TestTradeOperations:
         assert closed.outcome == TradeOutcome.WIN
         assert closed.pnl == 2000.0  # (170 - 150) * 100
         assert closed.exit_price == 170.0
+        assert closed.open_shares == 0.0
 
     def test_close_trade_loss(self, journal: Journal, sample_trade: TradeJournalEntry) -> None:
         trade_id = journal.add_trade(sample_trade)
@@ -138,6 +140,65 @@ class TestTradeOperations:
         open_trades = journal.get_open_trades()
         assert len(open_trades) == 1
         assert open_trades[0].ticker == "AAPL"
+
+    def test_partial_close_splits_realized_lot(self, journal: Journal) -> None:
+        trade_id = journal.add_trade(
+            TradeJournalEntry(
+                ticker="AAPL",
+                direction=Direction.LONG,
+                entry_price=100.0,
+                shares=100,
+                thesis="partial",
+            )
+        )
+
+        realized = journal.close_trade(trade_id, exit_price=110.0, shares=40)
+
+        assert realized is not None
+        assert realized.shares == 40
+        assert realized.parent_trade_id == trade_id
+        assert realized.pnl == 400.0
+
+        open_lot = journal.get_trade(trade_id)
+        assert open_lot is not None
+        assert open_lot.outcome == TradeOutcome.OPEN
+        assert open_lot.shares == 60
+        assert open_lot.open_shares == 60
+
+    def test_close_position_matches_fifo_across_lots(self, journal: Journal) -> None:
+        journal.add_trade(
+            TradeJournalEntry(
+                ticker="AAPL",
+                direction=Direction.LONG,
+                entry_price=100.0,
+                shares=50,
+                entry_date=datetime(2026, 3, 1),
+                thesis="lot 1",
+            )
+        )
+        journal.add_trade(
+            TradeJournalEntry(
+                ticker="AAPL",
+                direction=Direction.LONG,
+                entry_price=105.0,
+                shares=50,
+                entry_date=datetime(2026, 3, 2),
+                thesis="lot 2",
+            )
+        )
+
+        realized = journal.close_position(
+            ticker="AAPL",
+            direction=Direction.LONG,
+            shares=70,
+            exit_price=120.0,
+            notes="trim",
+        )
+
+        assert [lot.shares for lot in realized] == [50, 20]
+        open_lots = journal.get_open_lots(ticker="AAPL", direction=Direction.LONG)
+        assert len(open_lots) == 1
+        assert open_lots[0].shares == 30
 
     def test_get_recent_trades(self, journal: Journal) -> None:
         for i in range(5):
