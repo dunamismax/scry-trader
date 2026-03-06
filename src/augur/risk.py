@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from augur.models import OrderType
+from augur.models import OrderAction, OrderType
 
 if TYPE_CHECKING:
     from augur.config import RiskConfig
@@ -32,24 +32,37 @@ class RiskManager:
         self.config = config
 
     def check_order(self, order: OrderSpec, portfolio: AccountSummary) -> RiskCheckResult:
-        """Run all risk checks against a proposed order. Returns pass/fail with details."""
+        """Run all risk checks against a proposed order. Returns pass/fail with details.
+
+        Sell orders (closing/reducing positions) are treated differently from buys:
+        they skip position-sizing, concentration, buying-power, leverage, and
+        stop-loss checks because selling *reduces* exposure rather than increasing it.
+        The daily-loss circuit breaker still applies as a warning for sells but does
+        not block them — you must always be able to exit a position.
+        """
         violations: list[str] = []
         warnings: list[str] = []
+        is_sell = order.action == OrderAction.SELL
 
         # Paper trading gate
         if self.config.paper_trading:
             warnings.append("Paper trading mode is ON. Orders go to paper account.")
 
-        # Market orders must have a reference price for risk estimation
-        if order.order_type == OrderType.MARKET and order.reference_price is None:
+        # Market orders must have a reference price for risk estimation (buys only)
+        if (
+            not is_sell
+            and order.order_type == OrderType.MARKET
+            and order.reference_price is None
+        ):
             violations.append(
                 "Market orders require a reference_price for risk estimation. "
                 "Fetch a quote before submitting."
             )
 
-        # Stop-loss requirement
+        # Stop-loss requirement (buys only — sells are exits, not entries)
         if (
-            self.config.require_stop_loss
+            not is_sell
+            and self.config.require_stop_loss
             and order.stop_loss_price is None
             and order.stop_price is None
         ):
@@ -57,8 +70,8 @@ class RiskManager:
                 "Stop-loss required. Set stop_loss_price or stop_price on the order."
             )
 
-        # Position size check
-        if portfolio.total_value > 0:
+        # Position size check (buys only)
+        if not is_sell and portfolio.total_value > 0:
             order_value = _estimate_order_value(order)
             position_pct = (order_value / portfolio.total_value) * 100
 
@@ -79,8 +92,8 @@ class RiskManager:
                     f"of portfolio (exceeds {self.config.max_position_pct}% limit)"
                 )
 
-        # Buying power check
-        if portfolio.buying_power > 0:
+        # Buying power check (buys only — sells free up capital)
+        if not is_sell and portfolio.buying_power > 0:
             order_value = _estimate_order_value(order)
             if order_value > portfolio.buying_power:
                 violations.append(
@@ -88,8 +101,8 @@ class RiskManager:
                     f"${portfolio.buying_power:,.0f}"
                 )
 
-        # Leverage check
-        if portfolio.total_value > 0 and portfolio.margin_used > 0:
+        # Leverage check (buys only)
+        if not is_sell and portfolio.total_value > 0 and portfolio.margin_used > 0:
             invested = portfolio.margin_used + _estimate_order_value(order)
             leverage = invested / portfolio.total_value
             if leverage > self.config.max_leverage:
@@ -98,18 +111,25 @@ class RiskManager:
                     f"(exceeds {self.config.max_leverage}x limit)"
                 )
 
-        # Daily loss check
+        # Daily loss check — warns for sells but never blocks them
         if portfolio.total_value > 0 and portfolio.unrealized_pnl < 0:
             daily_loss_pct = abs(portfolio.unrealized_pnl) / portfolio.total_value * 100
             if daily_loss_pct > self.config.max_daily_loss_pct:
-                violations.append(
-                    f"Daily loss is {daily_loss_pct:.1f}% "
-                    f"(exceeds {self.config.max_daily_loss_pct}% circuit breaker). "
-                    "Consider closing positions before opening new ones."
-                )
+                if is_sell:
+                    warnings.append(
+                        f"Daily loss is {daily_loss_pct:.1f}% "
+                        f"(exceeds {self.config.max_daily_loss_pct}% circuit breaker). "
+                        "Sell order proceeding to reduce exposure."
+                    )
+                else:
+                    violations.append(
+                        f"Daily loss is {daily_loss_pct:.1f}% "
+                        f"(exceeds {self.config.max_daily_loss_pct}% circuit breaker). "
+                        "Consider closing positions before opening new ones."
+                    )
 
         # Naked options check
-        if not self.config.allow_naked_options:
+        if not is_sell and not self.config.allow_naked_options:
             # This would need contract type info — placeholder for Phase 3
             pass
 

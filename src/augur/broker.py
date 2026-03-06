@@ -264,10 +264,21 @@ class Broker:
         contract = Stock(spec.symbol, "SMART", "USD")
         await self.ib.qualifyContractsAsync(contract)
 
+        # Bracket orders require a valid limit price for the parent entry.
+        # Market-style entries (no limit_price) are incompatible with brackets;
+        # use the reference_price as a reasonable limit, or reject.
+        parent_price = spec.limit_price or spec.reference_price
+        if not parent_price or parent_price <= 0:
+            raise BrokerError(
+                "Bracket orders require a limit_price or reference_price "
+                "for the parent entry order. Market orders without a price "
+                "reference cannot be submitted as brackets."
+            )
+
         bracket = self.ib.bracketOrder(
             action=spec.action.value,
             quantity=spec.quantity,
-            limitPrice=spec.limit_price or 0,
+            limitPrice=parent_price,
             takeProfitPrice=spec.take_profit_price,
             stopLossPrice=spec.stop_loss_price,
         )

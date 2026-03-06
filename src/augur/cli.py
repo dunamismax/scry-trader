@@ -381,6 +381,7 @@ def _trade_flow(
         return
 
     # Submit
+    primary_result: OrderResult | None = None
     try:
         if order_spec.take_profit_price and order_spec.stop_loss_price:
             results = _run(_submit_bracket(broker, order_spec))
@@ -389,18 +390,37 @@ def _trade_flow(
                     f"[green]Order {r.order_id}:[/green] {r.status} "
                     f"({r.symbol} {r.action.value} {r.quantity})"
                 )
+            primary_result = results[0]  # parent/entry order
         else:
             result = _run(_submit_order(broker, order_spec))
             console.print(
                 f"[green]Order {result.order_id}:[/green] {result.status} "
                 f"({result.symbol} {result.action.value} {result.quantity})"
             )
+            primary_result = result
     except BrokerError as e:
         console.print(f"[red]Order submission failed:[/red] {e}")
         sys.exit(1)
 
-    # Determine journal entry price: prefer limit_price, fall back to reference_price
-    entry_price = order_spec.limit_price or order_spec.reference_price
+    # Only journal the trade if it was actually filled (or partially filled).
+    # The broker returns status from the first update event — don't record
+    # trades that were rejected, cancelled, or haven't filled yet.
+    if (
+        primary_result.filled_quantity is not None
+        and primary_result.filled_quantity <= 0
+    ):
+        console.print(
+            "[dim]Order submitted but not yet filled — skipping journal entry. "
+            "Run 'augur portfolio' to check status.[/dim]"
+        )
+        return
+
+    # Use the actual fill price when available, otherwise fall back to spec
+    entry_price = (
+        primary_result.filled_price
+        or order_spec.limit_price
+        or order_spec.reference_price
+    )
 
     # Determine direction: selling an existing long is not a short trade
     if action == OrderAction.SELL:
