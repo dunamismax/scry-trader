@@ -17,7 +17,7 @@ CLI-first. Every trade requires human confirmation. Claude analyzes, sizes, and 
 
 ```
 augur portfolio     # Positions, P&L, allocation
-augur watch [SYM]   # Live quotes for watchlist or specific symbols
+augur watch [SYM]   # Quote snapshots for watchlist or specific symbols
 augur analyze TICKER # Deep Claude analysis with entry/exit/risk levels
 augur ask "question" # Free-form question with portfolio context
 augur buy TICKER     # Interactive buy flow with Claude sizing
@@ -55,7 +55,6 @@ uv sync --all-extras
 #   rm -rf .venv && uv sync --all-extras
 
 # Configure
-cp config.toml.example config.toml
 # Edit config.toml with your IBKR and Anthropic API settings
 
 # Run

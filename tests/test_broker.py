@@ -34,6 +34,46 @@ class FakePosition:
 
 
 @dataclass
+class FakePortfolioItem:
+    symbol: str
+    quantity: float
+    average_cost: float
+    account: str
+    market_price: float
+    market_value: float
+    unrealized_pnl: float
+    realized_pnl: float = 0.0
+
+    @property
+    def contract(self) -> SimpleNamespace:
+        return SimpleNamespace(symbol=self.symbol)
+
+    @property
+    def position(self) -> float:
+        return self.quantity
+
+    @property
+    def averageCost(self) -> float:  # noqa: N802
+        return self.average_cost
+
+    @property
+    def marketPrice(self) -> float:  # noqa: N802
+        return self.market_price
+
+    @property
+    def marketValue(self) -> float:  # noqa: N802
+        return self.market_value
+
+    @property
+    def unrealizedPNL(self) -> float:  # noqa: N802
+        return self.unrealized_pnl
+
+    @property
+    def realizedPNL(self) -> float:  # noqa: N802
+        return self.realized_pnl
+
+
+@dataclass
 class FakeAccountValue:
     tag: str
     value: str
@@ -77,11 +117,13 @@ class FakeIB:
         self,
         *,
         positions: list[FakePosition] | None = None,
+        portfolio_items: list[FakePortfolioItem] | None = None,
         account_values: list[FakeAccountValue] | None = None,
         trade_outcomes: list[dict[str, float | str]] | None = None,
     ) -> None:
         self.client = FakeClient()
         self._positions = positions or []
+        self._portfolio_items = portfolio_items or []
         self._account_values = account_values or []
         self._trade_outcomes = trade_outcomes or []
         self.placed_orders: list[Any] = []
@@ -104,6 +146,11 @@ class FakeIB:
         if not account:
             return list(self._positions)
         return [position for position in self._positions if position.account == account]
+
+    def portfolio(self, account: str = "") -> list[FakePortfolioItem]:
+        if not account:
+            return list(self._portfolio_items)
+        return [item for item in self._portfolio_items if item.account == account]
 
     async def reqTickersAsync(self, *contracts: Any) -> list[SimpleNamespace]:  # noqa: N802
         return [
@@ -281,6 +328,41 @@ class TestBrokerRequireConnection:
 
 @pytest.mark.asyncio
 class TestBrokerAccountAndOrders:
+    async def test_get_positions_prefers_marked_to_market_portfolio_feed(self) -> None:
+        broker = Broker(IBKRConfig(account="DU123"))
+        broker.ib = FakeIB(
+            portfolio_items=[
+                FakePortfolioItem(
+                    "AAPL",
+                    10,
+                    100.0,
+                    "DU123",
+                    110.0,
+                    1_100.0,
+                    100.0,
+                    25.0,
+                ),
+                FakePortfolioItem(
+                    "MSFT",
+                    20,
+                    200.0,
+                    "DU999",
+                    210.0,
+                    4_200.0,
+                    200.0,
+                ),
+            ]
+        )
+        broker._connected = True
+
+        positions = await broker.get_positions()
+
+        assert [position.symbol for position in positions] == ["AAPL"]
+        assert positions[0].market_price == 110.0
+        assert positions[0].market_value == 1_100.0
+        assert positions[0].unrealized_pnl == 100.0
+        assert positions[0].realized_pnl == 25.0
+
     async def test_get_positions_filters_to_configured_account(self) -> None:
         broker = Broker(IBKRConfig(account="DU123"))
         broker.ib = FakeIB(

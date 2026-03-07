@@ -1,14 +1,14 @@
 # augur — Build Tracker
 
-**Status:** Phase 1 — IBKR Connection & Market Data
-**Last Updated:** 2026-03-04
+**Status:** Functional CLI, still paper-first and not production-ready
+**Last Updated:** 2026-03-07
 **Branch:** `main`
 
 ---
 
 ## What This Repo Is
 
-AI-assisted, human-directed trading system. Claude analyzes market data and positions; the human makes every trade decision. Built on Interactive Brokers (via ib-async) with Anthropic's API for analysis. CLI-first — no web UI.
+Narrow Python CLI for Interactive Brokers portfolio access, LLM trade review, risk checks, and journaling. Human-in-the-loop only. No web UI, no automation-first scope creep.
 
 ## Architecture Snapshot
 
@@ -35,69 +35,46 @@ augur/
 
 ---
 
-## Phase Plan
+## Current Reality
 
-### Phase 1 — IBKR Connection & Market Data (Current)
+### Working Commands
 
-**Goal:** Reliable connection to IBKR Gateway/TWS with live market data streaming and portfolio snapshot.
+- `augur portfolio` shows account summary plus positions.
+- `augur watch [SYMBOL ...]` returns quote snapshots. It is not a streaming terminal view.
+- `augur analyze`, `augur ask`, `augur buy`, `augur sell`, `augur risk`, and `augur journal` all exist.
+- `augur alerts` is still a placeholder.
 
-**Success criteria:** Run `augur status` → see account summary, positions, and P&L. Run `augur watch AAPL` → see live bid/ask/last streaming to terminal.
+### Portfolio Data Honesty
 
-- [ ] Verify `broker.py` connects to IBKR Gateway (paper account first)
-- [ ] Implement `augur status` — account summary, buying power, positions with P&L
-- [ ] Implement `augur watch <symbol>` — live streaming quotes (Rich live display)
-- [ ] Portfolio snapshot: fetch all positions with cost basis, market value, unrealized P&L
-- [ ] Historical data fetch for a given symbol + timeframe
-- [ ] Connection resilience: auto-reconnect on disconnect, connection state logging
-- [ ] Config validation: ensure `config.toml` has required IBKR connection params
-- [ ] Test with IBKR paper trading account
-- [ ] Verify: `augur status` returns real data, `augur watch` streams live
+- `portfolio` now prefers IBKR's portfolio feed for per-position marked-to-market fields: market price, market value, unrealized P&L, realized P&L.
+- If that feed is unavailable, the CLI falls back to raw position data from `IB.positions()`. That fallback preserves symbol, quantity, and average cost, but per-position marked-to-market fields may be zero.
+- Account-level totals still come from IBKR account summary tags such as `NetLiquidation` and `BuyingPower`.
 
-### Phase 2 — Claude Analysis Engine
+### Highest-Value Remaining Work
 
-**Goal:** Claude analyzes positions and market conditions, produces actionable insights.
-
-- [ ] `augur analyze <symbol>` — fetch data, send to Claude with market context, display analysis
-- [ ] `augur review` — portfolio-wide analysis (risk concentration, sector exposure, opportunities)
-- [ ] Prompt engineering: system prompt with trading context, tool use for data retrieval
-- [ ] Analysis output: structured (risk score, conviction level, key factors, suggested actions)
-- [ ] Rate limiting / cost tracking for Anthropic API calls
-- [ ] Journal integration: log every analysis with timestamp and market snapshot
-
-### Phase 3 — Risk Management & Journaling
-
-- [ ] Position sizing calculator (Kelly criterion or fixed-fractional)
-- [ ] Risk rules: max position size, max sector concentration, max drawdown alerts
-- [ ] Trade journal: record decisions, rationale, entry/exit, outcome
-- [ ] `augur journal` — view/search decision history
-- [ ] P&L attribution: which analyses led to profitable decisions
-
-### Phase 4 — Alerting & Automation
-
-- [ ] Price alerts (notify via Signal through OpenClaw)
-- [ ] Scheduled portfolio reviews (OpenClaw cron → `augur review` → Signal summary)
-- [ ] Watchlist management
-- [ ] Paper trade execution (human confirms, system submits to paper account)
+- Verify the portfolio-feed path against a real IBKR paper session and confirm multi-account scoping behaves as expected.
+- Decide whether missing marked-to-market portfolio data should warn loudly or hard-fail instead of silently falling back.
+- Improve connection resilience and state reporting; transient IBKR disconnects still fail the command.
+- Keep the scope narrow: IBKR + LLM review + journal CLI. No web app, no autonomous execution.
 
 ---
 
 ## Verification Snapshot
 
 ```
-uv run ruff check src/   ✅  (all checks passed)
-uv run mypy src/          ✅  (11 source files, no issues)
+python -m compileall src tests
 ```
 
-Last verified: 2026-03-04
+Last verified: 2026-03-07
 
 ---
 
 ## Agent Instructions
 
 - This is a **Python** project — use `uv` for all package management, never pip directly.
-- Run verification with `uv run ruff check src/` and `uv run mypy src/`.
+- Run the strongest available verification from the local environment. Prefer `uv` when dependencies are present.
 - IBKR connection requires TWS or IB Gateway running — tests should mock `ib-async` connections.
 - **Never place real trades** without explicit human confirmation. Paper account only during development.
-- Rich library for terminal output — use `rich.console`, `rich.table`, `rich.live` for streaming data.
+- Rich library for terminal output — use `rich.console` and `rich.table` for the current CLI.
 - `config.toml` holds runtime config — never commit secrets (API keys, account numbers) to it.
 - Update this BUILD.md in the same commit as meaningful changes.

@@ -89,8 +89,12 @@ class Broker:
     # --- Portfolio ---
 
     async def get_positions(self) -> list[Position]:
-        """Fetch all current positions."""
+        """Fetch current positions, preferring marked-to-market portfolio data."""
         self._require_connection()
+        portfolio_items = _get_portfolio_items(self.ib, self.config.account)
+        if portfolio_items:
+            return [_portfolio_item_to_position(item) for item in portfolio_items]
+
         ib_positions = self.ib.positions(self.config.account)
         positions: list[Position] = []
         for p in ib_positions:
@@ -312,6 +316,44 @@ def _safe_float(value: Any) -> float:
         return f
     except (ValueError, TypeError):
         return 0.0
+
+
+def _get_portfolio_items(ib: IB, account: str) -> list[Any]:
+    """Return portfolio items scoped to the configured account when available."""
+    portfolio = getattr(ib, "portfolio", None)
+    if portfolio is None:
+        return []
+
+    try:
+        items = portfolio(account)
+    except TypeError:
+        items = portfolio(account=account) if account else portfolio()
+
+    scoped_items: list[Any] = []
+    for item in items:
+        item_account = str(getattr(item, "account", "") or "")
+        if account and item_account and item_account != account:
+            continue
+        scoped_items.append(item)
+    return scoped_items
+
+
+def _portfolio_item_to_position(item: Any) -> Position:
+    """Convert an ib_async portfolio item to a Position model."""
+    contract = getattr(item, "contract", None)
+    avg_cost = getattr(item, "averageCost", getattr(item, "avgCost", 0.0))
+    unrealized_pnl = getattr(item, "unrealizedPNL", getattr(item, "unrealizedPnl", 0.0))
+    realized_pnl = getattr(item, "realizedPNL", getattr(item, "realizedPnl", 0.0))
+    return Position(
+        symbol=str(getattr(contract, "symbol", "")),
+        quantity=_safe_float(getattr(item, "position", 0.0)),
+        avg_cost=_safe_float(avg_cost),
+        market_price=_safe_float(getattr(item, "marketPrice", 0.0)),
+        market_value=_safe_float(getattr(item, "marketValue", 0.0)),
+        unrealized_pnl=_safe_float(unrealized_pnl),
+        realized_pnl=_safe_float(realized_pnl),
+        account=str(getattr(item, "account", "") or ""),
+    )
 
 
 def _apply_order_metadata(order: Order, spec: OrderSpec, account: str) -> None:
